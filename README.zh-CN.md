@@ -4,14 +4,14 @@
 
 管理独立 Codex daemon，发现供应商模型，并通过 MCP 跨供应商派发任务。使用键盘 TUI 完成配置和日常操作。
 
-![字符 TUI 首页：使用后端和管理后端两张卡片](docs/images/tui-home.png)
+![字符 TUI 首页：使用后端和管理后端两张卡片](docs/images/tui-home.zh-CN.png)
 
 *实际运行的首页：居中的字符卡片，选中时轻微放大并反色。*
 
 ## 使用前提
 
 - Linux（含 WSL）、Python 3.11+ 及其 `venv` 模块，以及 `codex` CLI。
-- 已配置好的 Codex 目录，或通过密钥环境变量访问供应商服务。
+- 支持尚未配置的 Codex：接入时选择 **打开原生 Codex**，完成 Codex 自身的初始配置。
 
 ## 安装
 
@@ -34,70 +34,94 @@ cd codexd-bridge
 
 </details>
 
-## 接入现有 Codex
+## 配置 Codex 并接入桥接
 
 ```bash
 codexd-bridge
 ```
 
-1. 选择 **Manage backends → Set up this Codex**。
-2. 保留预填的 Codex 目录和名称，或选择需要接入的现有目录。
-3. 使用目录中已配置的供应商；标准 Codex 如果尚未显式设置供应商，选择 **OpenAI**。
-4. 选择 **Set up**。管理器会按需启动后台、验证模型访问、安装指南并注册 MCP 工具。
+1. 选择 **管理后端 → 接入当前 Codex**。
+2. 保留预填的目录和名称，或选择其他 Codex 目录。首次使用或尚未登录时，选择 **打开原生 Codex**，完成其原生接入流程后返回。
+3. 选择 **检查 Codex**，读取运行中后台的供应商、模型和认证状态；后台未运行时会标为尚未检查。
+4. 使用目录中已配置的供应商；标准 Codex 如果尚未显式设置供应商，选择 **OpenAI**。
+5. 选择 **开始接入**。管理器会按需启动后台、验证模型访问、安装指南并注册 MCP 工具。
 
 配置完成后，使用该目录新启动的 Codex 会话会自动发现桥接功能。已有会话可能需要重新连接；配置失败会保留输入，并提供重试入口。
 
-![TUI 运行画面：使用演示 Codex 目录的首次接入表单](docs/images/tui-setup.png)
+![TUI 运行画面：使用演示 Codex 目录的首次接入表单](docs/images/tui-setup.zh-CN.png)
 
 *实际运行的接入表单，图中使用演示目录。*
 
+OpenAI 的供应商选择与登录方式分别处理。接入时沿用所选 Codex 目录的登录状态：
+
+| 使用方式 | 登录方式 |
+| --- | --- |
+| ChatGPT 套餐权益 | 浏览器登录（`codex login`）或设备码登录（`codex login --device-auth`） |
+| OpenAI Platform 按用量计费 | 由 Codex 管理的 OpenAI API Key |
+| 企业自动化 | 由工作区管理员开放权限的 Codex access token |
+
+状态页分别显示当前供应商使用的认证和 Codex 保存的账户；不会仅凭 ChatGPT 账户类型推断浏览器、设备码或访问令牌登录。
+设备码属于 ChatGPT 登录流程。具体条件和登录步骤见[官方认证说明](https://learn.chatgpt.com/docs/auth)。
+
 ## 添加其他供应商
 
-先在终端导出供应商的密钥环境变量，再打开管理器并选择 **Manage backends → New provider**。服务须支持 Responses API。
+先在终端导出供应商的密钥环境变量，再打开管理器并选择 **管理后端 → 新建供应商**。服务须支持 Responses API。
 
 | 表单字段 | 填写内容 |
 | --- | --- |
-| Provider name | 简短名称，例如 `demo`；对应启动命令为 `codex-demo` |
-| API endpoint | 供应商的 Responses API 基础地址 |
-| API key environment variable | 环境变量**名称**，例如 `DEMO_API_KEY`；桥接层不保存密钥值 |
-| Model ID | 供应商提供的准确模型标识 |
-| Context limit | 模型文档规定的上下文令牌上限 |
-| Reasoning effort | 可选；留空使用供应商默认值 |
+| 供应商名称 | 简短名称，例如 `demo`；对应启动命令为 `codex-demo` |
+| API 地址 | 供应商的 Responses API 基础地址 |
+| API 密钥环境变量 | 环境变量**名称**，例如 `DEMO_API_KEY`；桥接层不保存密钥值 |
+| 模型 ID | 供应商提供的准确模型标识 |
+| 上下文上限 | 模型文档规定的上下文令牌上限 |
+| 推理强度 | 可选；留空使用供应商默认值 |
 
-选择一次 **Create provider**，即可创建配置、验证真实响应、启用后端并安装启动命令。若未完成，选择 **Retry connection** 继续接入。
+选择一次 **创建供应商**，即可创建配置、验证真实响应、启用后端并安装启动命令。若未完成，选择 **重试连接** 继续接入。
 
 ## 日常操作
 
 首页提供两张卡片：
 
-- **Use backend（使用后端）**：打开 Codex、浏览模型和管理会话。
-- **Manage backends（管理后端）**：添加配置、接入桥接工具、管理服务和卸载。
+- **使用后端**：打开 Codex、浏览模型和管理会话。
+- **管理后端**：添加配置、接入桥接工具、管理服务和卸载。
 
 顶部为只读概览：每个后端的名称、供应商和桥接状态放在同一信息块中，上方显示整体统计。窗口较矮时显示统计；空间不足时标明未展示的后端数量。操作需要目标时，如果只有一套配置则直接使用；有多套时再选择，按回车进入。
-**Daemon status** 用于检查对应 Codex 服务是否运行。关闭管理界面后，已启动的服务仍可继续运行。
+**后台服务状态** 用于检查对应 Codex 服务是否运行。关闭管理界面后，已启动的服务仍可继续运行。
 
-![实际运行的管理页面：配置、后台服务和工具分列显示](docs/images/tui-manager.png)
+![实际运行的管理页面：配置、后台服务和工具分列显示](docs/images/tui-manager.zh-CN.png)
 
 | 要做什么 | TUI 入口 | 操作结果 |
 | --- | --- | --- |
-| 接入已有 Codex 目录 | **Manage backends → Attach existing** | 将现有目录加入管理器 |
-| 接入或刷新桥接工具 | **Manage backends → Connect bridge** | 验证模型访问，安装指南并注册 MCP |
-| 浏览或验证模型 | **Use backend → Models** / **All models** | 查看单个后端或所有已配置后端 |
-| 管理任务 | **Use backend → Sessions** | 创建、继续、派生或引导活动任务 |
-| 查看、启动或停止后台 | **Manage backends → Daemon status** / **Start daemon** / **Stop daemon** | 操作当前选中的后端 |
-| 安装 `codex-NAME` 命令 | **Manage backends → Install launcher** | 只安装命令，不启动后台或发送模型请求 |
-| 打开原生 Codex | **Use backend → Open Codex** | 进入对应供应商界面，关闭后返回管理器 |
-| 查找其他操作 | **Manage backends → More tools** | daemon 配置创建、注册表切换、自定义模型验证、原生参数、诊断、MCP 详情和卸载 |
+| 检查当前 Codex | **管理后端 → 当前 Codex** | 读取其运行中后台的账户和模型信息 |
+| 接入已有 Codex 目录 | **管理后端 → 接入已有目录** | 将现有目录加入管理器 |
+| 接入或刷新桥接工具 | **管理后端 → 连接桥接** | 验证模型访问，安装指南并注册 MCP |
+| 浏览或验证模型 | **使用后端 → 模型** / **所有模型** | 查看单个后端或所有已配置后端 |
+| 管理任务 | **使用后端 → 会话** | 创建、继续、派生或引导活动任务 |
+| 查看、启动或停止后台 | **管理后端 → 后台服务状态** / **启动后台服务** / **停止后台服务** | 操作当前选中的后端 |
+| 安装 `codex-NAME` 命令 | **管理后端 → 安装启动命令** | 只安装命令，不启动后台或发送模型请求 |
+| 打开原生 Codex | **使用后端 → 打开 Codex** | 进入对应供应商界面，关闭后返回管理器 |
+| 查找其他操作 | **管理后端 → 更多工具** | daemon 配置创建、注册表切换、自定义模型验证、原生参数、诊断、MCP 详情和卸载 |
 
-**快捷键：** `Tab` / `Shift+Tab` 切换卡片或功能区，`↑` / `↓` 在区内选择。
-表单内用 `Tab` 切换字段；`Enter` 选择 · `Ctrl+S` 提交 · `Esc` 返回 · `Ctrl+Q` 退出。
-终端最小尺寸为 60 列、18 行。停止 daemon 需要确认；免逐次审批的任务派发须在 **Connect bridge** 中明确启用。
+界面默认跟随系统语言，按 `F2` 在中文和英文之间切换，并自动记住选择。中文按显示宽度对齐，英文按词换行。
+
+| 快捷键 | 操作 |
+| --- | --- |
+| `?` / `F1` | 查看帮助；输入框中用 `F1` |
+| `F2` | 切换中文 / English，保留当前输入和选择 |
+| `Tab` / `Shift+Tab` | 切换功能区或表单字段；菜单中也可用 `h` / `l` 或 `←` / `→` |
+| `j` / `k` 或 `↓` / `↑` | 在菜单或列表内选择 |
+| `1`–`9` | 定位首页编号卡片，或切换对应功能区 |
+| `Alt+1`–`Alt+9` | 定位当前功能区的编号操作，或底部编号按钮，再按 `Enter` 执行 |
+| `Home` / `End` | 选择区内首项或末项 |
+| `Ctrl+S` / `Esc` / `Ctrl+Q` | 提交表单 / 返回 / 退出 |
+
+终端最小尺寸为 60 列、18 行。停止 daemon 需要确认；免逐次审批的任务派发须在 **连接桥接** 中明确启用。
 
 ## 升级
 
 - 在新版下载目录运行 `./install.sh`。安装器会刷新属于本安装且已启用的 MCP 注册和未经修改的指南，无需重启 daemon；构建失败会保留原来的可用版本。
-- 如果指南有本地修改或刷新未完成，检查修改后选择 **Manage backends → Set up this Codex → Update to this version**。
-- 通过其他包管理方式安装时，更新程序包后，在各后端选择 **Connect bridge → Update the installed bridge skill**。
+- 如果指南有本地修改或刷新未完成，检查修改后选择 **管理后端 → 接入当前 Codex → 更新至当前版本**。
+- 通过其他包管理方式安装时，更新程序包后，在各后端选择 **连接桥接 → 更新已安装的桥接技能**。
 - 状态升级会保留已有任务的调用关系。旧版桥接程序无法读取升级后的状态；没有调用关系记录的旧任务需重新创建会话。
 
 ## 派发任务
@@ -114,8 +138,8 @@ codexd-bridge
 | 移除 daemon 及其数据 | `codexd-bridge daemon remove NAME --purge` | 额外删除该 daemon 的数据 |
 | 卸载桥接项目 | `codexd-bridge uninstall` | 移除桥接程序及其集成；保留独立 daemon 和数据 |
 
-- **TUI 入口：** 进入 **Manage backends**，选择 **Remove daemon** 或 **More tools → Uninstall bridge**。破坏性操作需要确认，删除数据还需输入后端名称。
-- 停止或移除 daemon 会中断其活动任务。保留的数据可通过 **Attach existing** 重新接入；移除失败时保留禁用的注册记录，便于重试。
+- **TUI 入口：** 进入 **管理后端**，选择 **移除后台服务** 或 **更多工具 → 卸载桥接工具**。破坏性操作需要确认，删除数据还需输入后端名称。
+- 停止或移除 daemon 会中断其活动任务。保留的数据可通过 **接入已有目录** 重新接入；移除失败时保留禁用的注册记录，便于重试。
 - 数据删除会拒绝受保护或共享的 Codex 目录，以及包含桥接程序、注册表或其他后端的目录。
 - `./uninstall.sh` 也可卸载桥接项目。卸载会保留本地修改过的指南和其他程序的命令。
 
@@ -129,7 +153,7 @@ codexd-bridge
 | 使用其他注册表 | `codexd-bridge --config /absolute/bridge.toml ui` |
 | 启动 MCP stdio 入口 | `codexd-bridge serve` |
 
-诊断不会发送模型请求，结果以 JSON 输出；发现检查错误时退出码为 1。也可在 **Manage backends → More tools → Diagnostics** 中查看。
+诊断不会发送模型请求，结果以 JSON 输出；发现检查错误时退出码为 1。也可在 **管理后端 → 更多工具 → 诊断** 中查看。
 
 [发行指南](docs/releasing.md)列出验证结果及未验证的平台和模型；[架构说明](docs/architecture.md)介绍会话与失败处理；[版本变更](CHANGELOG.md)汇总功能改进。
 

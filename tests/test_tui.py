@@ -15,6 +15,7 @@ from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.output.vt100 import Vt100_Output
+from prompt_toolkit.utils import get_cwidth
 
 from codexd_bridge.config import Backend
 from codexd_bridge.delegation import DelegationGuard, OperatorGuard
@@ -41,7 +42,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.pipe = self.pipe_context.__enter__()
         self.addCleanup(self.pipe_context.__exit__, None, None, None)
         self.output = ResizableOutput()
-        self.ui = BridgeUI(self.registry, input=self.pipe, output=self.output)
+        self.ui = BridgeUI(self.registry, input=self.pipe, output=self.output, language="en")
         self.task = asyncio.create_task(self.ui.app.run_async())
         await asyncio.sleep(0.05)
 
@@ -91,6 +92,149 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             "".join(screen.data_buffer[y][x].char for x in range(self.output.size.columns))
             for y in range(self.output.size.rows)
         )
+
+    async def test_language_switch_preserves_form_input_choices_and_focus(self):
+        self.register()
+        self.ui.new_session()
+        self.fill(title="中英文 task? 123", prompt="Keep Back and Home verbatim")
+        sandbox = self.ui.fields["sandbox"]
+        sandbox.current_value = "workspace-write"
+        focus = self.ui.fields["title"]
+        self.ui.app.layout.focus(focus)
+        focus.buffer.cursor_position = 3
+        self.pipe.send_text("\x1bOQ")  # F2
+        await self.until(lambda: self.ui.language == "zh-CN")
+        await asyncio.sleep(0.05)
+        self.assertIn("会话标题", self.rendered())
+        self.assertEqual(focus.text, "中英文 task? 123")
+        self.assertEqual(focus.buffer.cursor_position, 3)
+        self.assertEqual(sandbox.current_value, "workspace-write")
+        self.assertTrue(self.ui.app.layout.has_focus(focus))
+        # A fresh process uses the saved selection even with an English locale.
+        with patch.dict(os.environ, {"LC_ALL": "en_US.UTF-8"}):
+            fresh = BridgeUI(self.registry, input=self.pipe, output=self.output)
+        self.assertEqual(fresh.language, "zh-CN")
+        self.pipe.send_text("?hjk123")
+        await self.until(lambda: "?hjk123" in focus.text)
+        self.assertFalse(self.ui.help_open)
+        self.assertEqual(self.ui.fields["prompt"].text, "Keep Back and Home verbatim")
+
+    async def test_help_preserves_focus_and_blocks_submit_shortcuts(self):
+        self.ui.new_provider()
+        focus = self.ui.fields["name"]
+        submit = Mock()
+        self.ui.submit = submit
+        self.pipe.send_text("\x1bOP")  # F1 works inside input fields.
+        await self.until(lambda: self.ui.help_open)
+        self.pipe.send_text("\t")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.help_button))
+        self.pipe.send_text("\t")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.help_area))
+        self.pipe.send_text("\x13\x0e\x1b1")  # Submit/new-provider/Alt+1 must not act through help.
+        await asyncio.sleep(0.05)
+        submit.assert_not_called()
+        self.assertTrue(self.ui.help_open)
+        self.assertEqual(focus.text, "")
+        self.assertIs(self.ui.fields["name"], focus)
+        self.pipe.send_text("\x1bOQ")
+        await self.until(lambda: self.ui.language == "zh-CN")
+        await self.until(lambda: "快捷键说明" in self.rendered())
+        self.pipe.send_text("?")
+        await self.until(lambda: not self.ui.help_open)
+        self.assertTrue(self.ui.app.layout.has_focus(focus))
+        self.assertEqual(focus.text, "")
+
+    async def test_help_survives_worker_completion_and_returns_to_result(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.ui.work("Loading models", lambda _p: gate.wait(2),
+                     lambda _r: self.ui.text("Model verified", "A real response was verified and the test session was deleted."))
+        self.pipe.send_text("?")
+        await self.until(lambda: self.ui.help_open)
+        gate.set()
+        await self.until(lambda: self.ui.title == "Model verified")
+        self.assertTrue(self.ui.help_open)
+        self.pipe.send_text("?")
+        await self.until(lambda: not self.ui.help_open)
+        self.assertTrue(self.ui.app.layout.has_focus(self.ui.buttons["Back"]))
+        self.pipe.send_text("\x1bOQ")
+        await self.until(lambda: self.ui.language == "zh-CN")
+        await self.until(lambda: "模型验证通过" in self.rendered())
+        self.assertIn("已验证真实模型响应", self.rendered())
+
+    async def test_vim_navigation_and_number_selection_use_current_group(self):
+        self.register()
+        self.pipe.send_text("l\x1b3")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Stop daemon"]))
+        self.assertFalse(self.ui.busy)  # Number keys select; Enter is required to run.
+        self.pipe.send_text("k")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Start daemon"]))
+        self.pipe.send_text("\x1b[F")  # End
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Remove daemon"]))
+        self.pipe.send_text("hl")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Remove daemon"]))
+        self.pipe.send_text("\x1b[H")  # Home
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Daemon status"]))
+        self.pipe.send_text("3")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["More tools"]))
+        self.pipe.send_text("2")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Daemon status"]))
+        self.assertEqual(self.ui.screen, "manager")
+        self.ui.home()
+        self.pipe.send_text("2\r")
+        await self.until(lambda: self.ui.screen == "manager")
+
+    async def test_alt_numbers_focus_bottom_buttons_without_executing(self):
+        self.ui.setup_codex()
+        self.fill(home=str(self.root), name="saved")
+        self.ui.app.layout.focus(self.ui.fields["name"])
+        with patch.object(self.ui, "open_native_codex") as native:
+            self.pipe.send_text("123")
+            await self.until(lambda: "123" in self.ui.fields["name"].text)
+            value = self.ui.fields["name"].text
+            self.pipe.send_text("\x1b3")  # Alt+3 selects Open native Codex.
+            await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Open native Codex"]))
+            native.assert_not_called()
+            self.assertEqual(self.ui.fields["name"].text, value)
+            self.pipe.send_text("\r")
+            await self.until(lambda: native.called)
+        native.assert_called_once_with(self.root, back=self.ui.setup_codex)
+        self.assertEqual(self.ui.setup_draft["name"], value)
+        self.register()
+        self.ui.confirm_stop()
+        with patch.object(self.ui, "daemon") as stop:
+            self.pipe.send_text("\x1b2")  # Back.
+            await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Back"]))
+            self.pipe.send_text("\x1b1")
+            await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Stop daemon"]))
+            stop.assert_not_called()
+            self.pipe.send_text("\r")
+            await self.until(lambda: stop.called)
+        self.assertEqual(stop.call_args.args, ("stop",))
+
+    async def test_chinese_layout_and_help_remain_usable_at_minimum_size(self):
+        self.register()
+        self.ui.toggle_language()
+        self.output.size = Size(rows=18, columns=60)
+        self.ui.home()
+        await asyncio.sleep(0.05)
+        rendered = self.rendered()
+        self.assertIn("使用后端", rendered)
+        self.assertIn("管理后端", rendered)
+        self.assertIn("F2 English", rendered)
+        self.assertIn("桥接：1 个已启用", rendered)
+        self.pipe.send_text("?")
+        await self.until(lambda: self.ui.help_open)
+        self.pipe.send_text("\x1b[6~\x1b[6~")  # PageDown reaches all help rows.
+        await asyncio.sleep(0.05)
+        self.assertIn("Ctrl+Q / Ctrl+C", self.rendered())
+        self.pipe.send_text("?")
+        await self.until(lambda: not self.ui.help_open)
+        self.ui.connect()
+        self.ui.fields["unattended"].checked = True
+        self.ui.toggle_language()
+        self.assertTrue(self.ui.fields["unattended"].checked)
+        self.assertEqual(self.ui.selected, "demo")
 
     async def test_keyboard_opens_form_and_preserves_fields_on_resize(self):
         self.pipe.send_text("\x0e")  # Ctrl+N
@@ -147,18 +291,75 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ui.fields["update"].current_value, "replace")
 
     async def test_setup_missing_provider_offers_a_choice_without_config_editing(self):
-        self.activate("Manage backends")
-        self.activate("Set up this Codex")
-        self.fill(home=str(self.root))
-        with patch("codexd_bridge.providers._resolve_executable", return_value=self.root / "bridge"), patch(
-            "codexd_bridge.integration.install_bridge",
-            side_effect=ValueError("home config.toml must set 'model_provider' explicitly"),
-        ):
-            self.activate("Set up")
-            await self.until(lambda: self.ui.screen == "error")
-        self.activate("Retry setup")
+        for message in ("home config.toml must set 'model_provider' explicitly",
+                        "home does not contain config.toml; nothing is created"):
+            with self.subTest(message=message):
+                self.ui.setup_codex()
+                self.fill(home=str(self.root))
+                with patch("codexd_bridge.providers._resolve_executable", return_value=self.root / "bridge"), patch(
+                    "codexd_bridge.integration.install_bridge", side_effect=ValueError(message),
+                ):
+                    self.activate("Set up")
+                    await self.until(lambda: self.ui.screen == "error")
+                self.assertIn("Open native Codex", self.ui.buttons)
+                self.activate("Retry setup")
+                self.assertEqual(self.ui.fields["home"].text, str(self.root))
+                self.assertIn("provider", self.ui.fields)
+
+    async def test_empty_home_uses_native_codex_and_keeps_setup_draft(self):
+        self.ui.setup_codex()
+        empty = self.root / "not-created"
+        self.fill(home=str(empty), name="my-codex")
+        self.ui.fields["provider"].current_value = "openai"
+        async def run(function, **_kwargs):
+            return function()
+        with patch("codexd_bridge.tui.run_in_terminal", side_effect=run), patch(
+            "codexd_bridge.tui.subprocess.run", return_value=Mock(returncode=0)
+        ) as native, patch("codexd_bridge.integration.install_bridge") as install:
+            self.activate("Open native Codex")
+            await self.until(lambda: not self.ui.busy)
+        self.assertEqual(native.call_args.args[0], ["codex"])
+        self.assertEqual(native.call_args.kwargs["env"]["CODEX_HOME"], str(empty))
+        self.assertNotIn("capture_output", native.call_args.kwargs)
+        self.assertTrue(empty.is_dir())
+        self.assertEqual(list(empty.iterdir()), [])
+        self.assertFalse(self.registry.exists())
+        install.assert_not_called()
+        self.assertEqual(self.ui.fields["name"].text, "my-codex")
+        self.assertEqual(self.ui.fields["home"].text, str(empty))
+        self.assertEqual(self.ui.fields["provider"].current_value, "openai")
+        self.assertEqual(self.ui.screen, "form")
+
+    async def test_unconfigured_codex_status_returns_after_native_setup(self):
+        self.ui.codex_status(self.root / "new-home", back=self.ui.home)
+        await self.until(lambda: self.ui.title == "Codex account and model")
+        await asyncio.sleep(.05)
+        self.assertIn("have not been", self.rendered())
+        self.assertIn("checked.", self.rendered())
+        self.assertIn("Open native Codex", self.ui.buttons)
+        self.assertIn("Bridge setup", self.ui.buttons)
+        with patch("codexd_bridge.tui.run_in_terminal", new=AsyncMock(return_value=0)), patch(
+            "codexd_bridge.diagnostics.inspect_codex", return_value={
+                "connected": True, "provider": "openai", "model": None,
+                "authentication": "chatgpt", "account": "chatgpt", "plan": "free",
+            }
+        ) as inspect:
+            self.activate("Open native Codex")
+            await self.until(lambda: inspect.called and not self.ui.busy)
+        await asyncio.sleep(.05)
+        self.assertEqual(self.ui.title, "Codex account and model")
+        self.assertIn("ChatGPT account", self.rendered())
+        self.assertIn("Plan: free", self.rendered())
+        self.assertFalse(self.registry.exists())
+
+    async def test_account_inspection_failure_keeps_recovery_actions(self):
+        with patch("codexd_bridge.diagnostics.inspect_codex", side_effect=BridgeError("stale socket")):
+            self.ui.codex_status(self.root, back=self.ui.home)
+            await self.until(lambda: self.ui.title == "Cannot inspect Codex")
+        self.assertFalse(self.ui.busy)
+        self.assertEqual(set(self.ui.buttons), {"Open native Codex", "Refresh", "Bridge setup", "Back"})
+        self.activate("Bridge setup")
         self.assertEqual(self.ui.fields["home"].text, str(self.root))
-        self.assertIn("provider", self.ui.fields)
 
     async def test_missing_credential_reference_blocks_creation(self):
         self.setup_provider()
@@ -426,38 +627,61 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(stream.getvalue(), r"\x1b\[[0-9;]*7m[^\x1b]*Manage backends")
 
     async def test_cards_and_status_content_stay_centered_on_resize(self):
-        for columns, rows in ((60, 18), (100, 30), (140, 40)):
-            with self.subTest(columns=columns, rows=rows):
-                self.output.size = Size(rows=rows, columns=columns)
-                self.ui.home()
-                await asyncio.sleep(.05)
-                positions = []
-                for _ in range(2):
-                    lines = self.rendered().splitlines()
-                    self.assertNotIn("Window too small", "\n".join(lines))
-                    labels = []
-                    for label in ("Use backend", "Manage backends"):
-                        y = max(i for i, line in enumerate(lines) if label in line)
-                        labels.append((y, lines[y].index(label) + (len(label) - 1) / 2))
-                    self.assertEqual(labels[0][0], labels[1][0])
-                    self.assertAlmostEqual(sum(x for _, x in labels) / 2, (columns - 1) / 2, delta=1)
-                    status_bottom = next(i for i, line in enumerate(lines) if "└" in line)
-                    card_top = next(i for i in range(status_bottom + 1, rows) if "┌" in lines[i])
-                    card_bottom = max(i for i, line in enumerate(lines) if "└" in line)
-                    self.assertAlmostEqual((card_top + card_bottom) / 2,
-                                           (status_bottom + 2 + rows - 3) / 2, delta=1)
-                    positions.append(labels)
-                    self.pipe.send_text("\t")
+        for language in ("en", "zh-CN"):
+            self.ui.language = language
+            for columns, rows in ((60, 18), (81, 26), (100, 30), (140, 40)):
+                with self.subTest(language=language, columns=columns, rows=rows):
+                    self.output.size = Size(rows=rows, columns=columns)
+                    self.ui.home()
                     await asyncio.sleep(.05)
-                self.assertEqual(positions[0], positions[1])
-                self.ui.text("Service status", "State: ready")
-                await asyncio.sleep(.05)
-                lines = self.rendered().splitlines()
-                top = next(i for i, line in enumerate(lines) if "┌" in line)
-                bottom = max(i for i, line in enumerate(lines) if "└" in line)
-                self.assertAlmostEqual((top + bottom) / 2, rows / 2, delta=1)
-                self.assertAlmostEqual((lines[top].index("┌") + lines[top].rindex("┐")) / 2,
-                                       (columns - 1) / 2, delta=1)
+                    positions = []
+                    for _ in range(2):
+                        screen = self.ui.app.renderer._last_screen
+                        lines = self.rendered().splitlines()
+                        self.assertNotIn("Window too small", "\n".join(lines))
+                        centers = []
+                        visible_lines = []
+                        for label, description in (
+                            ("Use backend", "Start Codex\nSessions and models"),
+                            ("Manage backends", "Add/connect providers\nStart/stop services"),
+                        ):
+                            title = self.ui.t(label)
+                            y = max(i for i, line in enumerate(lines) if title in line)
+                            x = get_cwidth(lines[y][:lines[y].index(title)])
+                            row = screen.data_buffer[y]
+                            left = max(i for i in range(x) if row[i].char == "│")
+                            right = min(i for i in range(x + get_cwidth(title), columns) if row[i].char == "│")
+                            axis = (left + right) / 2
+                            centers.append(axis)
+                            # Measure actual terminal cells, including CJK continuation
+                            # cells, rather than Python string offsets or widget settings.
+                            for offset, text in enumerate([title] + self.ui.t(description).splitlines()):
+                                line = lines[y + offset]
+                                start = get_cwidth(line[:line.index(text)])
+                                self.assertEqual(start + (get_cwidth(text) - 1) / 2, axis)
+                                visible_lines.append((y + offset, start, text))
+                            top = max(i for i in range(y) if screen.data_buffer[i][left].char == "┌")
+                            bottom = min(i for i in range(y + 3, rows) if screen.data_buffer[i][left].char == "└")
+                            self.assertEqual(y + 1, (top + bottom) / 2)
+                        self.assertAlmostEqual(sum(centers) / 2, (columns - 1) / 2, delta=.5)
+                        status_bottom = next(i for i, line in enumerate(lines) if "└" in line)
+                        card_top = next(i for i in range(status_bottom + 1, rows) if "┌" in lines[i])
+                        card_bottom = max(i for i, line in enumerate(lines) if "└" in line)
+                        self.assertAlmostEqual((card_top + card_bottom) / 2,
+                                               (status_bottom + 2 + rows - 3) / 2, delta=1)
+                        positions.append(visible_lines)
+                        self.pipe.send_text("\t")
+                        await asyncio.sleep(.05)
+                    self.assertEqual(positions[0], positions[1])
+                    self.ui.text("Service status", "State: ready")
+                    await asyncio.sleep(.05)
+                    lines = self.rendered().splitlines()
+                    top = next(i for i, line in enumerate(lines) if "┌" in line)
+                    bottom = max(i for i, line in enumerate(lines) if "└" in line)
+                    self.assertAlmostEqual((top + bottom) / 2, rows / 2, delta=1)
+                    left = get_cwidth(lines[top][:lines[top].index("┌")])
+                    right = get_cwidth(lines[top][:lines[top].rindex("┐")])
+                    self.assertAlmostEqual((left + right) / 2, (columns - 1) / 2, delta=1)
 
     async def test_backend_overview_groups_identity_and_keeps_counts_readable(self):
         routes = {
@@ -678,6 +902,12 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: self.ui.app.layout.has_focus(self.ui.fields["name"]))
         await asyncio.sleep(0.05)
         self.assertIn("Provider name", self.rendered())
+        self.ui.app.layout.focus(self.ui.buttons["Back"])
+        self.pipe.send_text("\t")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.fields["name"]))
+        self.pipe.send_text("\x1b[Z")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Back"]))
+        self.assertFalse(self.ui.help_open)
 
     async def test_continue_fork_and_message_paging_keep_explicit_session_ids(self):
         self.register()

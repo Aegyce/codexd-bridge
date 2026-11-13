@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Add Chinese/English TUI switching, saved language preferences and shortcut help.
+- Add numbered function areas, Vim-style navigation and contextual shortcut hints; Alt+1–9 focuses actions before Enter runs them.
+- Align each card's title and description on one axis in both languages, preserving its center when focused.
+- Provide matching Chinese and English README screenshots.
+- Report Codex account and provider authentication separately, using live backend metadata.
+- Let unconfigured users complete onboarding in native Codex and return with their bridge setup inputs preserved.
+- Clarify ChatGPT browser/device-code login, OpenAI API key billing and enterprise access tokens.
+
 ## 0.4.1
 
 - Add guided installation and a keyboard TUI covering provider setup, sessions, diagnostics and daemon management.

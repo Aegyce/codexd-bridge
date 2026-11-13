@@ -5,6 +5,12 @@ covers CPython 3.11, 3.12, 3.13 and 3.14. Native protocol checks currently use C
 Windows without WSL, macOS, Linux ARM, other Codex versions and every provider/model combination
 have not been validated. Do not infer support from a successful unit-test run.
 
+The account status view was checked against Codex CLI 0.167.2 using `account/read` with
+`refreshToken=false`. It reports account type and provider authentication separately; this response
+does not identify browser/device-code/access-token sign-in. Older account protocols and live
+enterprise access-token accounts have not been validated. First-time onboarding is handed to
+the native Codex interface; the bridge does not implement login or collect credentials.
+
 ## Reproduce the checks
 
 From a checkout, create an isolated environment and install the locked runtime and check tools:

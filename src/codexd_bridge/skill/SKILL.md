@@ -46,6 +46,7 @@ description: 使用 Codex Daemon Bridge 创建或接入独立 daemon，发现各
 - 从项目下载包安装时，运行根目录的 `./install.sh`，脚本安装独立运行环境和短命令，完成后打开 TUI；后续在任意目录运行 `codexd-bridge`。无需手动创建或激活虚拟环境。卸载使用 `codexd-bridge uninstall` 或项目中的 `./uninstall.sh`，保留供应商配置、凭据和会话数据。
 - 人工首次接入只需运行 `codexd-bridge`，选择 **Manage backends → Set up this Codex**，按表单选择目录、供应商和指南更新方式。标准 Codex 未声明供应商时，在界面明确选择 **OpenAI**；程序会保存该选择，保留其他配置。配置、验证、安装技能和 MCP 注册由同一流程完成，失败后在界面重试。不要要求用户另行拼接安装或注册命令。
 - 已授权的自动化可使用 `codexd-bridge install` 接入当前 `CODEX_HOME`（默认 `~/.codex`）；其他目录用 `--home`，未声明供应商时用 `--provider` 显式选择，替换旧版技能用 `--update-skill`。路由会复用；新会话自动发现是否就绪，以 `registration.new_sessions_ready` 为准。只安装 Python 包不会注册 Codex 集成。
+- 当前 Codex 尚未配置或未登录时，在接入表单选择 **Open native Codex**，由原生 Codex 完成接入后返回；桥接层不重复实现登录或采集凭据。**Current Codex** / **Inspect Codex** 从已有后台读取认证和模型信息；后台未运行时标明尚未检查，不以缺少 config.toml 推断没有模型。账户类型与当前供应商认证分别显示，不据 ChatGPT 账户类型猜测浏览器、设备码或访问令牌登录。
 - 人工配置与管理默认打开 `codexd-bridge` TUI：可创建或接入 provider、启停后台、浏览和验证模型、管理会话并打开原生 Codex。无需让用户拼接创建参数。命令行参数保留给已授权的自动化；MCP 使用显式 `serve` 入口，管道中的无参数启动也保留 MCP 行为。
 - 从接口地址创建新供应商时，用 `codexd-bridge provider add NAME --base-url URL --env-key VARIABLE_NAME --model MODEL --context-window TOKENS`。服务必须支持 Responses API，当前 Codex 不再支持 Chat Completions。用户在环境中配置密钥，命令只保存变量名；按模型能力选择 `--effort`。检查通过后生成 `codex-NAME`，失败后用 `provider connect NAME` 继续验证并安装启动器。没有外部模型目录时只声明指定模型，不声称已发现供应商全部模型。
 - 用户要求创建新后台时，用已安装的 `codexd-bridge daemon create`，先通过 `--help` 核对参数。明确 provider、模型和新的绝对 `home`；不覆盖现有 home，也不复制凭据或会话历史。非内建 provider 从用户指定的 `--template-home` 复用公开连接设置。

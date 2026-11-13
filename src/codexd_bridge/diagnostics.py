@@ -94,3 +94,42 @@ def diagnose(registry: Path) -> dict:
                     "Inspect this backend through Connect bridge.")
     return {"version": __version__, "ok": not any(check["status"] == "error" for check in checks),
             "registry": str(registry), "checks": checks, "model_requests": False}
+
+
+def inspect_codex(home: Path) -> dict:
+    """Read non-secret state from an existing daemon; never start one or read auth files."""
+    from .transport import AppServer
+
+    home = home.expanduser()
+    if not home.is_absolute():
+        raise ValueError("Choose an absolute Codex directory.")
+    if home.exists() and not home.is_dir():
+        raise ValueError("Choose a Codex directory, not a file.")
+    result = {"home": str(home), "connected": False, "provider": None, "model": None,
+              "authentication": "unknown", "account": "unknown", "plan": None}
+    if not (home / "app-server-control/app-server-control.sock").exists():
+        return result
+    with AppServer(home, timeout=5) as client:
+        config = client.call("config/read", {"includeLayers": False}).get("config", {})
+        response = client.call("account/read", {"refreshToken": False})
+    account = response.get("account")
+    account_type = account.get("type") if isinstance(account, dict) else None
+    kind = account_type if account_type in {"apiKey", "chatgpt", "amazonBedrock", "gcp"} else "unknown"
+    required = response.get("requiresOpenaiAuth")
+    if required is True:
+        authentication = "sign_in_required" if account is None else kind
+    elif required is False:
+        # A saved OpenAI login may be unrelated to a custom provider's credentials.
+        authentication = kind if kind in {"amazonBedrock", "gcp"} else "provider_managed"
+    else:
+        authentication = "unknown"
+    result.update(connected=True, authentication=authentication, account=kind)
+    if isinstance(config, dict):
+        for key, native in (("provider", "model_provider"), ("model", "model")):
+            value = config.get(native)
+            result[key] = value if isinstance(value, str) and value.strip() else None
+    if kind == "chatgpt":
+        plan = account.get("planType")
+        if isinstance(plan, str) and plan != "unknown" and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", plan):
+            result["plan"] = plan
+    return result

@@ -4,10 +4,10 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from codexd_bridge import __version__
-from codexd_bridge.diagnostics import diagnose
+from codexd_bridge.diagnostics import diagnose, inspect_codex
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -70,3 +70,66 @@ class DiagnosticsTests(unittest.TestCase):
             if stale:
                 self.assertEqual(stale[0]["status"], "warning")
                 self.assertIn("Connect bridge", stale[0]["advice"])
+
+
+class CodexAccountTests(unittest.TestCase):
+    def test_missing_home_and_stopped_daemon_remain_unchecked(self):
+        with tempfile.TemporaryDirectory() as directory, patch("codexd_bridge.transport.AppServer") as client:
+            home = Path(directory) / "empty"
+            result = inspect_codex(home)
+            self.assertFalse(result["connected"])
+            self.assertEqual(result["authentication"], "unknown")
+            self.assertFalse(home.exists())
+            home.mkdir()
+            self.assertEqual(inspect_codex(home)["authentication"], "unknown")
+            client.assert_not_called()
+
+    def test_live_authentication_uses_provider_requirement_and_drops_account_details(self):
+        cases = [
+            (True, {"type": "apiKey"}, "apiKey"),
+            (True, {"type": "chatgpt", "planType": "free"}, "chatgpt"),
+            (True, {"type": "chatgpt", "planType": "unknown"}, "chatgpt"),
+            (False, {"type": "chatgpt", "planType": "pro"}, "provider_managed"),
+            (False, {"type": "apiKey"}, "provider_managed"),
+            (False, {"type": "amazonBedrock"}, "amazonBedrock"),
+            (True, None, "sign_in_required"),
+            (None, {"type": "chatgpt"}, "unknown"),
+            (True, {"type": "futureAccount"}, "unknown"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            socket = home / "app-server-control/app-server-control.sock"
+            socket.parent.mkdir()
+            socket.touch()
+            for required, account, expected in cases:
+                with self.subTest(required=required, account=account), patch("codexd_bridge.transport.AppServer") as factory:
+                    if account is not None:
+                        account.update(email="private@example.com", accessToken="SECRET-SENTINEL")
+                    client = factory.return_value.__enter__.return_value
+                    client.call.side_effect = [
+                        {"config": {"model_provider": "custom", "model": "model", "api_key": "SECRET-SENTINEL"}},
+                        {"requiresOpenaiAuth": required, "account": account},
+                    ]
+                    result = inspect_codex(home)
+                    self.assertEqual(result["authentication"], expected)
+                    self.assertTrue(result["connected"])
+                    self.assertEqual(result["provider"], "custom")
+                    if account and account.get("planType") == "unknown":
+                        self.assertIsNone(result["plan"])
+                    self.assertNotIn("SECRET-SENTINEL", json.dumps(result))
+                    self.assertNotIn("private@example.com", json.dumps(result))
+                    self.assertNotIn("device", json.dumps(result))
+                    self.assertEqual(client.call.call_args_list, [
+                        call("config/read", {"includeLayers": False}),
+                        call("account/read", {"refreshToken": False}),
+                    ])
+
+    def test_stale_socket_errors_are_not_reported_as_signed_out(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            socket = home / "app-server-control/app-server-control.sock"
+            socket.parent.mkdir()
+            socket.touch()
+            with patch("codexd_bridge.transport.AppServer", side_effect=RuntimeError("unreachable")):
+                with self.assertRaisesRegex(RuntimeError, "unreachable"):
+                    inspect_codex(home)

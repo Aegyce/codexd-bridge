@@ -12,7 +12,7 @@ A keyboard TUI guides setup and everyday operations.
 ## Prerequisites
 
 - Linux (including WSL), Python 3.11+ with `venv`, and the `codex` CLI.
-- An existing configured Codex home, or provider access through an API key environment variable.
+- Codex can be unconfigured: use **Open native Codex** during setup to complete its own onboarding.
 
 ## Install
 
@@ -37,16 +37,17 @@ For automated installation, use `./install.sh --no-launch`.
 
 </details>
 
-## Connect your existing Codex
+## Set up Codex and connect the bridge
 
 ```bash
 codexd-bridge
 ```
 
 1. Choose **Manage backends → Set up this Codex**.
-2. Keep the suggested Codex directory and name, or select the existing home you want to connect.
-3. Use its configured provider. For standard Codex without an explicit provider setting, choose **OpenAI**.
-4. Choose **Set up**. The manager starts the backend if needed, verifies model access, installs the guide and registers MCP tools.
+2. Keep the suggested directory and name, or choose another Codex home. If it is new or not signed in, select **Open native Codex**, complete Codex’s own setup and return here.
+3. Use **Inspect Codex** to read the running backend’s provider, model and authentication state. A stopped backend is shown as unchecked.
+4. Use its configured provider. For standard Codex without an explicit provider setting, choose **OpenAI**.
+5. Choose **Set up**. The manager starts the backend if needed, verifies model access, installs the guide and registers MCP tools.
 
 New Codex sessions using that home discover the bridge automatically. Existing sessions may need to reconnect.
 Failed setup keeps your input and offers a retry action.
@@ -54,6 +55,18 @@ Failed setup keeps your input and offers a retry action.
 ![Running TUI: setup form with a demonstration Codex directory](docs/images/tui-setup.png)
 
 *Setup form captured from the running TUI with a demonstration directory.*
+
+OpenAI sign-in is separate from the provider selection. Setup reuses the chosen Codex directory's login:
+
+| Access | Sign-in method |
+| --- | --- |
+| ChatGPT plan access | Browser login (`codex login`) or device code (`codex login --device-auth`) |
+| OpenAI Platform usage billing | OpenAI API key, managed by Codex |
+| Enterprise automation | Codex access token, when enabled by the workspace administrator |
+
+The status view distinguishes the authentication used by the provider from any saved Codex account.
+It does not infer browser/device-code/access-token login from a ChatGPT account response.
+Device code is a ChatGPT sign-in flow. See the [official authentication guide](https://learn.chatgpt.com/docs/auth) for requirements and login steps.
 
 ## Add another provider
 
@@ -88,6 +101,7 @@ one configured environment is used directly; with several, choose one and press 
 
 | Goal | TUI entry | Result |
 | --- | --- | --- |
+| Check the current Codex | **Manage backends → Current Codex** | Reads account and model metadata from its running backend |
 | Reuse a Codex home | **Manage backends → Attach existing** | Adds an existing home to the manager |
 | Connect or refresh bridge tools | **Manage backends → Connect bridge** | Verifies model access and installs the guide and MCP integration |
 | Browse or verify models | **Use backend → Models** / **All models** | Shows one backend or all configured backends |
@@ -97,8 +111,20 @@ one configured environment is used directly; with several, choose one and press 
 | Open native Codex | **Use backend → Open Codex** | Opens the selected provider; returns to the manager when it closes |
 | Find additional operations | **Manage backends → More tools** | Daemon configuration, registry selection, custom model checks, native arguments, diagnostics, MCP details and uninstall |
 
-**Keyboard:** `Tab` / `Shift+Tab` switch cards or function areas; `↑` / `↓` select within an area.
-In forms, `Tab` moves between fields. `Enter` selects · `Ctrl+S` submits · `Esc` returns · `Ctrl+Q` exits.
+The interface follows your system language initially. Press `F2` to switch between English and Chinese;
+your choice is saved. English text wraps at word boundaries, and Chinese uses terminal display widths.
+
+| Key | Action |
+| --- | --- |
+| `?` / `F1` | Open shortcut help; use `F1` while typing in a field |
+| `F2` | Switch English / 中文, preserving inputs and selection |
+| `Tab` / `Shift+Tab` | Switch areas or fields; menus also accept `h` / `l` or `←` / `→` |
+| `j` / `k` or `↓` / `↑` | Move within a menu or list |
+| `1`–`9` | Focus a numbered home card or switch function area |
+| `Alt+1`–`Alt+9` | Focus a numbered action in the current area or a bottom button; `Enter` runs it |
+| `Home` / `End` | Select the first / last action in the area |
+| `Ctrl+S` / `Esc` / `Ctrl+Q` | Submit form / go back / exit |
+
 The minimum terminal size is 60 columns by 18 rows. Stopping a daemon requires confirmation;
 unattended delegation is enabled only when explicitly selected under **Connect bridge**.
 
