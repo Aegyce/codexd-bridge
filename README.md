@@ -1,5 +1,7 @@
 # Codex Daemon Bridge
 
+English | [简体中文](README.zh-CN.md)
+
 Coordinate independent Codex App Server sessions across providers through MCP.
 Discover available models, delegate tasks, and continue conversations on another provider.
 
