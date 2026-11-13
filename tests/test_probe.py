@@ -178,8 +178,22 @@ class ProbeTests(unittest.TestCase):
         kwargs.setdefault("timeout", 5)
         return check_model(self.backend, client_factory=self.factory, **kwargs)
 
-    def test_probe_error_is_bridge_error(self):
-        self.assertTrue(issubclass(ProbeError, BridgeError))
+    def test_initial_empty_rollout_is_polled_without_restarting_the_probe(self):
+        original = self.server.call
+        pending = True
+
+        def starting(method, params):
+            nonlocal pending
+            if method == "thread/read" and pending:
+                pending = False
+                raise BridgeError("thread/read: rollout at /temporary/rollout.jsonl is empty")
+            return original(method, params)
+
+        with patch.object(self.server, "call", side_effect=starting):
+            self.assertTrue(self.check()["available"])
+        self.assertEqual(self.server.methods().count("thread/start"), 1)
+        self.assertEqual(self.server.methods().count("turn/start"), 1)
+        self.assertEqual(self.server.deleted, [{"threadId": "probe-thread"}])
 
     def test_success_binds_provider_defaults_and_cleans_up(self):
         result = self.check()
@@ -236,12 +250,14 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("files", PROBE_PROMPT)
 
     def test_live_completion_takes_precedence_over_stale_history(self):
-        self.server.turn_pages = [marker_turn(status="inProgress", text=None), marker_turn()]
+        self.server.turn_pages = [marker_turn(status="interrupted", text=None),
+                                  marker_turn(status="inProgress", text=None), marker_turn()]
         result = self.check()
         self.assertTrue(result["available"])
         self.assertNotIn("thread/turns/list", self.server.methods())
         self.assertEqual(self.server.interrupted, [])
         self.assertEqual(self.server.deleted, [{"threadId": "probe-thread"}])
+        self.assertEqual(self.server.methods().count("turn/start"), 1)
 
     def test_absent_model_or_unsupported_effort_blocks_before_creation(self):
         for kwargs in ({"model": "missing"}, {"model": "custom-model", "effort": "ultra"}):
@@ -258,6 +274,21 @@ class ProbeTests(unittest.TestCase):
             self.check()
         self.assertNotIn("turn/start", self.server.methods())
         self.assertEqual(self.server.deleted, [{"threadId": "probe-thread"}])
+
+    def test_creation_response_with_existing_activity_is_never_modified_or_deleted(self):
+        call = self.server.call
+        for extra in ({"status": {"type": "active"}}, {"name": "Existing task"}, {"preview": "Prior input"}):
+            self.server.calls.clear()
+            def existing(method, params):
+                result = call(method, params)
+                if method == "thread/start":
+                    result["thread"].update(extra)
+                return result
+            with patch.object(self.server, "call", side_effect=existing), self.assertRaisesRegex(ProbeError, "existing activity"):
+                self.check()
+            self.assertNotIn("thread/name/set", self.server.methods())
+            self.assertNotIn("turn/start", self.server.methods())
+            self.assertEqual(self.server.deleted, [])
 
     def test_requested_selection_must_be_applied_by_daemon(self):
         self.server.ignore_requested = True

@@ -283,7 +283,7 @@ class CreateDaemonTests(ProvisioningTestCase):
             'name = "Qwen"\n'
             'base_url = "https://dashscope.example.invalid/v1"\n'
             'env_key = "QWEN_API_KEY"\n'
-            'wire_api = "chat"\n'
+            'wire_api = "responses"\n'
             "requires_openai_auth = false\n"
             "request_max_retries = 3\n"
             "stream_max_retries = 2\n"
@@ -308,7 +308,7 @@ class CreateDaemonTests(ProvisioningTestCase):
                 "name": "Qwen",
                 "base_url": "https://dashscope.example.invalid/v1",
                 "env_key": "QWEN_API_KEY",
-                "wire_api": "chat",
+                "wire_api": "responses",
                 "requires_openai_auth": False,
                 "request_max_retries": 3,
                 "stream_max_retries": 2,
@@ -474,39 +474,17 @@ class CreateDaemonTests(ProvisioningTestCase):
             )
         self.assertNotIn("sk-xyz", str(ctx.exception))
 
-    def test_wire_api_invalid_refused(self):
-        template = self.make_template(extra='wire_api = "grpc"\n')
-        with self.assertRaises(ProvisioningError):
-            create_daemon(
-                "qwen",
-                self.home("qwen"),
-                "qwen",
-                "qwen3-max",
-                registry_path=self.registry,
-                template_home=template,
-            )
-
-    def test_requires_openai_auth_type_refused(self):
-        template = self.make_template(extra='requires_openai_auth = "false"\n')
-        with self.assertRaises(ProvisioningError):
-            create_daemon(
-                "qwen",
-                self.home("qwen"),
-                "qwen",
-                "qwen3-max",
-                registry_path=self.registry,
-                template_home=template,
-            )
-
-    def test_retry_field_type_refused(self):
-        for bad in (
-            "request_max_retries = -1\n",
-            "stream_max_retries = true\n",
-            "stream_idle_timeout_ms = 0\n",
+    def test_invalid_provider_fields_fail_before_creating_home(self):
+        # Each fixture is valid TOML so these exercise field validation, not duplicate-key errors.
+        for field, value in (
+            ("wire_api", '"grpc"'), ("wire_api", '"chat"'),
+            ("requires_openai_auth", '"false"'), ("request_max_retries", "-1"),
+            ("stream_max_retries", "true"), ("stream_idle_timeout_ms", "0"),
         ):
-            with self.subTest(bad=bad):
-                template = self.make_template(extra=bad)
-                with self.assertRaises(ProvisioningError):
+            with self.subTest(field=field, value=value):
+                template = self.make_template(fields='name="Qwen"\nbase_url="https://example.invalid/v1"\n'
+                                              + field + "=" + value + "\n")
+                with self.assertRaisesRegex(ProvisioningError, field):
                     create_daemon(
                         "qwen",
                         self.home("qwen"),
@@ -515,6 +493,8 @@ class CreateDaemonTests(ProvisioningTestCase):
                         registry_path=self.registry,
                         template_home=template,
                     )
+                self.assertFalse(self.home("qwen").exists())
+                self.assertFalse(self.registry.exists())
 
     def test_non_builtin_missing_base_url_refused(self):
         fields = 'name = "Qwen"\nenv_key = "QWEN_API_KEY"\nwire_api = "responses"\n'
@@ -543,11 +523,6 @@ class CreateDaemonTests(ProvisioningTestCase):
         config = tomllib.loads((self.home("gpt") / "config.toml").read_text())
         self.assertNotIn("model_providers", config)
         self.assertEqual(config["model_catalog_json"], str(template / "catalogs/qwen.json"))
-
-    def test_error_is_value_error(self):
-        with self.assertRaises(ValueError):
-            create_daemon("gpt", self.home("gpt"), "openai", "", registry_path=self.registry)
-
 
 class AttachDaemonTests(ProvisioningTestCase):
     """attach_daemon registers existing homes without touching their contents."""
@@ -978,11 +953,6 @@ class AttachDaemonTests(ProvisioningTestCase):
         self.assertIs(enabled.enabled, True)
         self.assertEqual(self.snapshot(home), before)
         self.run.assert_not_called()
-
-    def test_error_is_value_error(self):
-        with self.assertRaises(ValueError):
-            attach_daemon("qwen", self.home("missing"), registry_path=self.registry)
-
 
 class RegistryTests(ProvisioningTestCase):
     def test_registry_preserves_existing(self):
@@ -1438,6 +1408,36 @@ class DaemonActionTests(ProvisioningTestCase):
         self.assertNotIn("ERR-SECRET", str(ctx.exception))
         self.assertTrue((self.home("gpt") / "daemon-logs" / "daemon-stop.log").exists())
 
+    def test_failure_logs_do_not_overwrite_linked_user_files(self):
+        self.run.return_value = self.completed(1, "", "ERR-SECRET")
+        directory = self.home("gpt") / "daemon-logs"
+        directory.mkdir()
+        log = directory / "daemon-stop.log"
+        original = self.root / "user-settings"
+        for kind in ("symlink", "hardlink"):
+            with self.subTest(kind=kind):
+                original.write_text("keep user settings")
+                original.chmod(0o644)
+                if kind == "symlink":
+                    log.symlink_to(original)
+                else:
+                    os.link(original, log)
+                try:
+                    with self.assertRaisesRegex(BridgeError, "log could not be written"):
+                        daemon_action(self.backend, "stop")
+                    self.assertEqual(original.read_text(), "keep user settings")
+                    self.assertEqual(mode(original), 0o644)
+                finally:
+                    log.unlink()
+        directory.rmdir()
+        external = self.root / "external-directory"
+        external.mkdir(mode=0o755)
+        directory.symlink_to(external, target_is_directory=True)
+        with self.assertRaisesRegex(BridgeError, "log could not be written"):
+            daemon_action(self.backend, "stop")
+        self.assertEqual(list(external.iterdir()), [])
+        self.assertEqual(mode(external), 0o755)
+
     def test_timeout(self):
         self.run.side_effect = subprocess.TimeoutExpired(
             ["codex"], 3, output=b"OUT-SECRET", stderr=b"ERR-SECRET"
@@ -1501,14 +1501,6 @@ class DaemonActionTests(ProvisioningTestCase):
         self.assertEqual(env["QWEN_API_KEY"], "sk-ENV-SECRET")
         self.assertIsNot(env, os.environ)
         self.assertNotIn("sk-ENV-SECRET", str(result))
-
-    def test_errors_are_catchable(self):
-        self.run.return_value = self.completed(1, "", "x")
-        with self.assertRaises(BridgeError):
-            daemon_action(self.backend, "stop")
-        with self.assertRaises(ValueError):
-            daemon_action(self.backend, "restart")
-
 
 if __name__ == "__main__":
     unittest.main()

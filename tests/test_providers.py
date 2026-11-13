@@ -215,15 +215,21 @@ class AddProviderValidation(ProvidersTestCase):
             "https://api.example.invalid/v1?key=1",
             "https://api.example.invalid/v1#frag",
             "ftp://api.example.invalid", "not a url",
+            "https://api.example.invalid:bad/v1", "https://api.example.invalid:70000/v1",
+            "http://:80/v1", "https://api.example.invalid/\x00",
         ):
             self.assertRejected(base_url=url)
 
-    def test_context_window_must_be_positive_int(self):
+    def test_context_and_timeout_are_validated_before_creation(self):
         for cw in (0, -1, True, 1.5, "131072", None):
             self.assertRejected(context_window=cw)
+        for timeout in (float("nan"), float("inf"), 0, -1, True, "60"):
+            self.assertRejected(timeout=timeout)
 
     def test_wire_api_enum(self):
-        self.assertRejected(wire_api="grpc")
+        for wire_api in ("grpc", "chat"):
+            with self.subTest(wire_api=wire_api):
+                self.assertRejected(wire_api=wire_api)
 
     def test_model_required_nonempty(self):
         self.assertRejected(model="  ")
@@ -328,6 +334,24 @@ class AddProviderFailure(ProvidersTestCase):
 
 
 class ConnectProvider(ProvidersTestCase):
+    def test_changed_route_is_not_enabled_using_another_routes_model_check(self):
+        self.add()
+        set_backend_enabled("demo", False, registry_path=self.registry)
+        self.launcher().unlink()
+
+        def replace_selection(*_args, **_kwargs):
+            text = self.registry.read_text()
+            self.registry.write_text(text.replace('default_model = "demo-model"',
+                                                 'default_model = "untested-model"'))
+            return {"available": True}
+
+        self.check_model.side_effect = replace_selection
+        with self.assertRaisesRegex(ProviderError, "changed"):
+            self.connect()
+        self.assertFalse(self.read_registry()["demo"]["enabled"])
+        self.assertEqual(self.read_registry()["demo"]["default_model"], "untested-model")
+        self.assertFalse(self.launcher().exists())
+
     def test_retry_enables_disabled_route_and_installs_launcher(self):
         self.add()
         set_backend_enabled("demo", False, registry_path=self.registry)
@@ -358,16 +382,31 @@ class ConnectProvider(ProvidersTestCase):
     def test_idempotent_identical_launcher(self):
         self.add()
         before = self.launcher().read_bytes()
-        result = self.connect()
+        result = self.connect(update_skill=True)
+        self.install_skill.assert_called_with(self.homes / "demo", update=True)
         self.assertTrue(result["enabled"])
+        self.assertEqual(self.launcher().read_bytes(), before)
+        self.check_model.side_effect = lambda *_a, **_kw: self.launcher().unlink()
+        self.assertTrue(self.connect()["enabled"])
         self.assertEqual(self.launcher().read_bytes(), before)
 
     def test_refuses_differing_launcher(self):
         self.add()
-        self.launcher().write_text("different", encoding="utf-8")
-        with self.assertRaises((ProviderError, ProvisioningError)):
-            self.connect()
-        self.assertEqual(self.launcher().read_text(), "different")
+        original = self.launcher().read_text()
+        for during_verification in (False, True):
+            with self.subTest(during_verification=during_verification):
+                set_backend_enabled("demo", False, registry_path=self.registry)
+                self.launcher().write_text(original)
+                def replace(*_a, **_kw):
+                    self.launcher().write_text("different")
+                if during_verification:
+                    self.check_model.side_effect = replace
+                else:
+                    replace()
+                with self.assertRaises((ProviderError, ProvisioningError)):
+                    self.connect()
+                self.assertEqual(self.launcher().read_text(), "different")
+                self.assertFalse(self.read_registry()["demo"]["enabled"])
 
     def test_nondefault_launcher_dir(self):
         self.add()
@@ -542,6 +581,61 @@ class ProgressStages(ProvidersTestCase):
         self.assertEqual(len(self.read_registry()), 1)
 
 
+class LauncherOnly(ProvidersTestCase):
+    def setUp(self):
+        super().setUp()
+        providers.create_daemon("demo", self.homes / "demo", "openai", "model", registry_path=self.registry)
+
+    def install(self):
+        return providers.install_provider_launcher("demo", registry_path=self.registry,
+                                                    executable=self.executable, launcher_dir=self.bin)
+
+    def test_launcher_installation_is_offline_and_preserves_route_state(self):
+        before = self.registry.read_bytes()
+        result = self.install()
+        self.assertEqual(result["launcher"], str(self.launcher()))
+        self.assertTrue(result["created"])
+        self.assertEqual(before, self.registry.read_bytes())
+        self.daemon_action.assert_not_called()
+        self.check_model.assert_not_called()
+        self.install_skill.assert_not_called()
+        self.register_bridge.assert_not_called()
+        index = self.registry.with_name(self.registry.name + ".integrations.json")
+        self.assertEqual(json.loads(index.read_text())[0]["launchers"], [str(self.launcher())])
+
+    def test_identical_launcher_is_reused_and_foreign_launcher_is_preserved(self):
+        self.install()
+        before = self.launcher().read_bytes()
+        self.assertFalse(self.install()["created"])
+        self.assertEqual(before, self.launcher().read_bytes())
+        self.launcher().write_text("custom command")
+        with self.assertRaises(ProvisioningError):
+            self.install()
+        self.assertEqual(self.launcher().read_text(), "custom command")
+
+    def test_tracking_failure_rolls_back_only_newly_created_launcher(self):
+        with patch("codexd_bridge.installation.remember_registration", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.install()
+        self.assertFalse(self.launcher().exists())
+        self.install()
+        before = self.launcher().read_bytes()
+        with patch("codexd_bridge.installation.remember_registration", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.install()
+        self.assertEqual(before, self.launcher().read_bytes())
+        self.launcher().unlink()
+
+        def edited_then_failed(*_args, **_kwargs):
+            self.launcher().write_text("user customization")
+            raise OSError("disk full")
+
+        with patch("codexd_bridge.installation.remember_registration", side_effect=edited_then_failed):
+            with self.assertRaises(OSError):
+                self.install()
+        self.assertEqual(self.launcher().read_text(), "user customization")
+
+
 class RetryCommand(ProvidersTestCase):
     def test_config_is_global_flag_before_provider_connect(self):
         command = providers._retry_command("demo", self.registry, self.bin, self.executable)
@@ -660,7 +754,7 @@ class RunProvider(ProvidersTestCase):
 
     def test_changed_home_provider_cannot_start_interactive_or_exec_session(self):
         (self.homes / "demo" / "config.toml").write_text('model_provider="foreign"\n')
-        for argv in ([], ["exec", "task"], ["review"]):
+        for argv in ([], ["exec", "task"], ["review"], ["--no-daemon", "task"]):
             with self.assertRaisesRegex(ProvisioningError, "model_provider does not match"):
                 self.run_(argv)
         self.exec_runner.assert_not_called()
@@ -670,10 +764,15 @@ class RunProvider(ProvidersTestCase):
         self.run_(["-m", "other", "a prompt"])
         self.assertEqual(self.argv(), ["codex", "--remote", "unix://" + self.socket(), "-m", "other", "a prompt"])
 
-    def test_exec_passthrough_no_daemon(self):
-        self.run_(["exec", "hello"])
-        self.assertEqual(self.argv(), ["codex", "exec", "hello"])
-        self.daemon_action.assert_not_called()
+    def test_native_commands_and_standalone_mode_do_not_start_daemon(self):
+        for args in (["exec", "hello"], ["-a", "never", "exec", "hello"],
+                     ["--ask-for-approval", "never", "exec", "hello"],
+                     ["--add-dir", str(self.root), "exec", "hello"], ["a"],
+                     ["--no-daemon", "hello"]):
+            with self.subTest(args=args):
+                self.run_(args)
+                self.assertEqual(self.argv(), ["codex", *args])
+                self.daemon_action.assert_not_called()
 
     def test_help_and_review_passthrough(self):
         for args in (["--help"], ["help"], ["review"], ["-h"]):
@@ -690,8 +789,10 @@ class RunProvider(ProvidersTestCase):
             self.assertIn("--remote", self.argv())
 
     def test_prompt_word_exec_is_interactive(self):
-        self.run_(["please exec this"])
-        self.assertIn("--remote", self.argv())
+        for args in (["please exec this"], ["--", "exec"], ["--", "--help"]):
+            with self.subTest(args=args):
+                self.run_(args)
+                self.assertEqual(self.argv(), ["codex", "--remote", "unix://" + self.socket(), *args])
 
     def test_option_value_not_misclassified_as_subcommand(self):
         self.run_(["-m", "exec"])

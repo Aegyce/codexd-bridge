@@ -2,6 +2,8 @@
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -50,9 +52,9 @@ class DelegationTests(unittest.TestCase):
         )
 
     def test_missing_conflicting_or_malformed_metadata_is_rejected(self):
-        for meta in (None, {}, {"threadId": ""}, {"threadId": "a", "sessionId": "b"},
+        for meta in (None, {}, {"threadId": ""}, {"threadId": "a", "x-codex-turn-metadata": {"thread_id": "b"}},
                      {"threadId": "parent", "x-codex-turn-metadata": "invalid"},
-                     {"threadId": "parent", "x-codex-turn-metadata": {"session_id": "b"}},
+                     {"sessionId": "parent", "x-codex-turn-metadata": {"session_id": "b"}},
                      {"threadId": 12}, {"threadId": "x\n"}):
             with self.subTest(meta=meta):
                 request_meta.set(meta)
@@ -148,6 +150,40 @@ class DelegationTests(unittest.TestCase):
             b = workers.submit(reserve, self.child, self.parent)
             self.assertEqual(sorted([a.result(), b.result()]), [False, True])
 
+    def test_existing_deep_tree_does_not_block_an_unrelated_task_or_followup(self):
+        self.guard.record(self.parent, self.child)
+        self.guard.record(self.child, self.leaf)
+        self.config.write_text('[delegation]\nmax_depth=1\n' + self.config.read_text())
+        self.guard.record(self.parent, self.child)
+        self.guard.record(None, self.leaf)
+        self.guard.record(SessionRef(self.home, "other"), SessionRef(self.home, "new"))
+        with self.assertRaisesRegex(BridgeError, "depth"):
+            self.guard.record(self.leaf, SessionRef(self.home, "too-deep"))
+
+    def test_state_read_limit_counts_utf8_bytes(self):
+        raw = json.dumps({"version": 2, "links": {}, "note": "中文" * 40}, ensure_ascii=False)
+        self.guard.path.write_text(raw)
+        with patch("codexd_bridge.delegation.MAX_STATE_BYTES", len(raw)):
+            with self.assertRaisesRegex(BridgeError, "size limit"):
+                self.guard.describe([])
+
+    def test_created_id_collision_never_deletes_a_known_session(self):
+        bridge = Bridge(self.config, guard=self.guard)
+        alias = self.root / "home-alias"
+        alias.symlink_to(self.home, target_is_directory=True)
+        # An unrecorded caller must remain protected when its route uses a directory alias.
+        with self.assertRaisesRegex(BridgeError, "existing"):
+            bridge._record_created(self.client, self.parent, Backend("demo", alias, "demo"),
+                                   {"thread": {"id": "parent"}}, assignment={"task": "new"})
+        self.client.call.assert_not_called()
+        self.guard.record(self.parent, self.child)
+        for thread_id in ("parent", "child"):
+            with self.subTest(thread_id=thread_id), self.assertRaisesRegex(BridgeError, "existing"):
+                bridge._record_created(self.client, self.parent,
+                                       Backend("demo", self.home, "demo"),
+                                       {"thread": {"id": thread_id}}, assignment={"task": "new"})
+        self.client.call.assert_not_called()
+
     def test_corrupt_state_and_symlinks_fail_closed(self):
         for raw in ('broken', '{}', '{"version":1,"links":[]}',
                     json.dumps({"version": 1, "links": {self.parent.key: [self.parent.key]}}),
@@ -159,6 +195,14 @@ class DelegationTests(unittest.TestCase):
         self.guard.path.symlink_to(self.root / "absent")
         with self.assertRaises(BridgeError):
             self.guard.record(self.parent, self.child)
+        self.guard.path.unlink()
+        os.mkfifo(self.guard.path)
+        result = subprocess.run([sys.executable, "-c",
+            "from pathlib import Path; import sys; from codexd_bridge.delegation import DelegationGuard; "
+            "DelegationGuard(Path(sys.argv[1])).check(None)", str(self.config)],
+            text=True, capture_output=True, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("regular file", result.stderr)
 
     def test_failed_state_write_preserves_previous_graph(self):
         self.guard.record(self.parent, self.child)

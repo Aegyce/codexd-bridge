@@ -23,7 +23,10 @@ description: 使用 Codex Daemon Bridge 创建或接入独立 daemon，发现各
 
 - `create_session(backend, prompt, title, cwd, ...)`：`cwd` 必须是目标 daemon 机器上已存在的绝对目录；`sandbox` 只接受 `read-only` 或 `workspace-write`。
 - 工具返回成功只表示请求被接受、turn 已启动，不表示任务完成。用 `read_session(backend, thread_id)` 查看状态与近期消息，用 `read_messages` 按 turn 分页；间隔轮询，不要忙等。
-- 空闲会话用 `send_message` 继续；同 provider 派生分支用 `fork_session`。
+- 空闲会话用 `send_message` 继续；同 provider 派生分支用 `fork_session`，允许子会话从自身继续派生。
+- 每次创建或派生都填写 `session_type`（例如 `worker`、`reviewer`、`tester`）、任务要求 `prompt` 和 `acceptance_criteria`。省略验收标准会被标为未指定，不会自动继承上级任务的标准。
+- 桥接层自动生成 `delegation` 记录，包含唯一标识、父会话、调用方、历史来源 `fork_source`、根会话、深度、任务要求和验收标准，并写入新会话的首条消息。身份来源由 daemon 校验，不通过工具参数指定。再次派生使用新记录；继承历史中的旧记录只描述其原会话，不是当前子会话的身份或任务。
+- 创建结果、`read_session` 和 `list_sessions` 返回任务记录。用记录核对直接父会话、实际目标和验收要求；回复时提供结果、验证证据和未完成项。后续消息可以细化任务，初始派生记录保留以供追溯。
 
 ## 活动 turn
 
@@ -40,8 +43,11 @@ description: 使用 Codex Daemon Bridge 创建或接入独立 daemon，发现各
 
 ## 新 daemon 与后续会话接入
 
+- 从项目下载包安装时，运行根目录的 `./install.sh`，脚本安装独立运行环境和短命令，完成后打开 TUI；后续在任意目录运行 `codexd-bridge`。无需手动创建或激活虚拟环境。卸载使用 `codexd-bridge uninstall` 或项目中的 `./uninstall.sh`，保留供应商配置、凭据和会话数据。
+- 人工首次接入只需运行 `codexd-bridge`，选择 **Set up this Codex**，按表单选择目录、供应商和指南更新方式。标准 Codex 未声明供应商时，在界面明确选择 **OpenAI**；程序会保存该选择，保留其他配置。配置、验证、安装技能和 MCP 注册由同一流程完成，失败后在界面重试。不要要求用户另行拼接安装或注册命令。
+- 已授权的自动化可使用 `codexd-bridge install` 接入当前 `CODEX_HOME`（默认 `~/.codex`）；其他目录用 `--home`，未声明供应商时用 `--provider` 显式选择，替换旧版技能用 `--update-skill`。路由会复用；新会话自动发现是否就绪，以 `registration.new_sessions_ready` 为准。只安装 Python 包不会注册 Codex 集成。
 - 人工配置与管理默认打开 `codexd-bridge` TUI：可创建或接入 provider、启停后台、浏览和验证模型、管理会话并打开原生 Codex。无需让用户拼接创建参数。命令行参数保留给已授权的自动化；MCP 使用显式 `serve` 入口，管道中的无参数启动也保留 MCP 行为。
-- 从接口地址创建新供应商时，用 `codexd-bridge provider add NAME --base-url URL --env-key VARIABLE_NAME --model MODEL --context-window TOKENS`。用户在环境中配置密钥，命令只保存变量名；按实际接口选择 `--wire-api` 和 `--effort`。检查通过后生成 `codex-NAME`，失败后用 `provider connect NAME` 继续验证并安装启动器。没有外部模型目录时只声明指定模型，不声称已发现供应商全部模型。
+- 从接口地址创建新供应商时，用 `codexd-bridge provider add NAME --base-url URL --env-key VARIABLE_NAME --model MODEL --context-window TOKENS`。服务必须支持 Responses API，当前 Codex 不再支持 Chat Completions。用户在环境中配置密钥，命令只保存变量名；按模型能力选择 `--effort`。检查通过后生成 `codex-NAME`，失败后用 `provider connect NAME` 继续验证并安装启动器。没有外部模型目录时只声明指定模型，不声称已发现供应商全部模型。
 - 用户要求创建新后台时，用已安装的 `codexd-bridge daemon create`，先通过 `--help` 核对参数。明确 provider、模型和新的绝对 `home`；不覆盖现有 home，也不复制凭据或会话历史。非内建 provider 从用户指定的 `--template-home` 复用公开连接设置。
 - 新建后端默认禁用。`daemon start <backend>` 后，用 `connect <backend>` 做真实模型检查、安装本技能并注册 MCP；检查通过后启用派发。`models check <backend> --model <model> --effort <effort>` 可单独验证，临时会话须从目标 daemon 删除。
 - MCP 审批拒绝不能通过伪造只读属性绕过。只有用户明确授权自动派发时，才使用 `connect --allow-session-writes`，该选项仅批准四项会话写工具。

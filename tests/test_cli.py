@@ -80,31 +80,97 @@ class CliTests(unittest.TestCase):
     def connect_error(self, *extra):
         return self.run_cli_error("connect", "demo", "--executable", str(self.executable), *extra)
 
+    def test_uninstall_dispatches_without_loading_provider_configuration(self):
+        with patch("codexd_bridge.installation.uninstall_current") as uninstall, patch(
+            "codexd_bridge.cli.registry_path", side_effect=AssertionError("must not read registry")
+        ):
+            out, err = self.run_cli("uninstall")
+        uninstall.assert_called_once_with()
+        self.assertEqual((out, err), ("", ""))
+
+    def test_version_does_not_load_registry(self):
+        with redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as caught:
+            cli.main(["--version"])
+        self.assertEqual(caught.exception.code, 0)
+        self.assertIn("codexd-bridge ", out.getvalue())
+        self.load.assert_not_called()
+
+    def test_doctor_returns_nonzero_with_machine_readable_findings(self):
+        with patch("codexd_bridge.diagnostics.diagnose", return_value={"ok": False, "checks": []}), \
+                redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as caught:
+            cli.main(["--config", str(self.config), "doctor"])
+        self.assertEqual(caught.exception.code, 1)
+        self.assertFalse(json.loads(out.getvalue())["ok"])
+        self.load.assert_not_called()
+
     def test_provider_add_passes_connection_settings_and_registry(self):
         with patch("codexd_bridge.providers.add_provider", return_value={"enabled": True}) as add:
             out, _ = self.run_cli(
                 "provider", "add", "demo", "--base-url", "https://provider.example/v1",
                 "--env-key", "DEMO_API_KEY", "--model", "model", "--context-window", "131072",
-                "--effort", "high", "--wire-api", "chat", "--home", str(self.home / "new"),
+                "--effort", "high", "--wire-api", "responses", "--home", str(self.home / "new"),
             )
         self.assertTrue(json.loads(out)["enabled"])
         self.assertEqual(add.call_args.args,
                          ("demo", "https://provider.example/v1", "DEMO_API_KEY", "model", 131072))
         self.assertEqual(add.call_args.kwargs["registry_path"], self.config)
-        self.assertEqual(add.call_args.kwargs["wire_api"], "chat")
+        self.assertEqual(add.call_args.kwargs["wire_api"], "responses")
+        with patch("codexd_bridge.providers.add_provider") as add:
+            self.assertIn("invalid choice", self.run_cli_error("provider", "add", "demo", "--wire-api", "chat"))
+            add.assert_not_called()
+
+    def test_daemon_remove_defaults_to_retaining_data(self):
+        with patch("codexd_bridge.removal.remove_daemon", return_value={"removed": True}) as remove:
+            out, _ = self.run_cli("daemon", "remove", "demo")
+        self.assertTrue(json.loads(out)["removed"])
+        self.assertEqual(remove.call_args.args, ("demo",))
+        self.assertFalse(remove.call_args.kwargs["purge"])
+        self.assertEqual(remove.call_args.kwargs["registry_path"], self.config)
+
+    def test_daemon_remove_passes_purge_without_additional_confirmation(self):
+        with patch("codexd_bridge.removal.remove_daemon", return_value={"removed": True}) as remove:
+            self.run_cli("daemon", "remove", "demo", "--purge")
+        self.assertTrue(remove.call_args.kwargs["purge"])
 
     def test_provider_run_forwards_flags_and_double_dash(self):
-        for prefix in ([], ["--"]):
-            with patch("codexd_bridge.providers.run_provider", return_value=None) as run:
-                out, _ = self.run_cli("provider", "run", "demo", *prefix, "--help")
-            run.assert_called_once_with("demo", ["--help"], registry_path=self.config)
-            self.assertEqual(out, "")
+        from functools import partial
+
+        from codexd_bridge.providers import run_provider
+
+        (self.home / "config.toml").write_text('model_provider="demo"\n')
+        for tail, attaches in ((["--help"], False), (["exec", "task"], False),
+                               (["--", "exec"], True), (["--", "--help"], True),
+                               (["--", "--no-daemon"], True),
+                               (["--", "--", "task"], True),
+                               (["--no-daemon", "task"], False)):
+            execute = Mock(return_value=None)
+            with self.subTest(tail=tail), patch("codexd_bridge.providers.load_backends",
+                    return_value={"demo": self.backend}), patch(
+                    "codexd_bridge.providers._ensure_running") as start, patch(
+                    "codexd_bridge.providers.run_provider",
+                    side_effect=partial(run_provider, exec_runner=execute)):
+                out, _ = self.run_cli("provider", "run", "demo", *tail)
+                remote = ["--remote", "unix://" + str(self.backend.socket_path)] if attaches else []
+                self.assertEqual(execute.call_args.args[1], ["codex", *remote, *tail])
+                self.assertEqual(execute.call_args.args[2]["CODEX_HOME"], str(self.home))
+                self.assertEqual(start.call_count, int(attaches))
+                self.assertEqual(out, "")
+        self.assertIn("Choose a backend", self.run_cli_error("provider", "run"))
 
     def test_provider_connect_retries_existing_route(self):
         with patch("codexd_bridge.providers.connect_provider", return_value={"enabled": True}) as finish:
-            self.run_cli("provider", "connect", "demo", "--launcher-dir", str(self.home / "bin"))
+            self.run_cli("provider", "connect", "demo", "--launcher-dir", str(self.home / "bin"), "--update-skill")
         self.assertEqual(finish.call_args.args, ("demo",))
         self.assertEqual(finish.call_args.kwargs["registry_path"], self.config)
+        self.assertTrue(finish.call_args.kwargs["update_skill"])
+
+    def test_provider_launcher_installs_command_without_verification(self):
+        with patch("codexd_bridge.providers.install_provider_launcher", return_value={"created": True}) as install:
+            out, _ = self.run_cli("provider", "launcher", "demo", "--launcher-dir", str(self.home / "bin"))
+        self.assertTrue(json.loads(out)["created"])
+        install.assert_called_once_with("demo", registry_path=self.config,
+                                        launcher_dir=self.home / "bin", executable=None)
+        self.check.assert_not_called()
 
     def test_provider_add_requires_finite_context_information(self):
         err = self.run_cli_error("provider", "add", "demo", "--base-url", "https://example.com",
@@ -144,7 +210,8 @@ class CliTests(unittest.TestCase):
         self.register.assert_called_once_with(
             self.home, self.executable, self.config.resolve(), allow_session_writes=False
         )
-        self.enable.assert_called_once_with("demo", True, registry_path=self.config.resolve())
+        self.enable.assert_called_once_with("demo", True, registry_path=self.config.resolve(),
+                                            expected_backend=self.backend)
 
     def test_connect_model_failure_blocks_install_register_enable(self):
         self.check.side_effect = ProbeError("Backend demo: probe reply was wrong")

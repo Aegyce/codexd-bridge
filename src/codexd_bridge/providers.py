@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -45,7 +46,6 @@ __all__ = ["ProviderError", "add_provider", "connect_provider", "run_provider"]
 DEFAULT_LAUNCHER_DIR = Path("~/.local/bin")
 _DATA_BASE = Path("~/.local/share/codexd-bridge")
 _LAUNCHER_PREFIX = "codex-"
-_WIRE_APIS = frozenset({"chat", "responses"})
 _HELP_FLAGS = frozenset({"--help", "-h", "--version", "-V"})
 
 # Native subcommands that attach to the owning daemon (verified --remote support).
@@ -55,16 +55,17 @@ _PASSTHROUGH = frozenset(
     {
         "exec", "e", "review", "help", "debug", "mcp", "plugin", "login", "logout",
         "app-server", "completion", "doctor", "features", "sandbox", "update",
-        "cloud", "apply", "exec-server", "remote-control", "migrate-rollouts",
+        "cloud", "apply", "a", "exec-server", "remote-control", "migrate-rollouts",
         "migrate-nfs-db", "archive", "delete", "unarchive",
     }
 )
 _COMMANDS = _ATTACH | _PASSTHROUGH
 _LONG_VALUE = frozenset(
     {"--config", "--enable", "--disable", "--remote", "--remote-auth-token-env",
-     "--image", "--model", "--profile", "--sandbox", "--cd", "--local-provider"}
+     "--image", "--model", "--profile", "--sandbox", "--cd", "--local-provider",
+     "--ask-for-approval", "--add-dir"}
 )
-_SHORT_VALUE = frozenset({"-c", "-m", "-p", "-s", "-C", "-i"})
+_SHORT_VALUE = frozenset({"-c", "-m", "-p", "-s", "-C", "-i", "-a"})
 
 
 class ProviderError(BridgeError):
@@ -143,12 +144,14 @@ def _check_external_catalog(path: Path, model: str, context_window: int, compact
 
 def _resolve_executable(executable: Path | None) -> Path:
     if executable is None:
+        installed = os.environ.get("CODEXD_BRIDGE_EXECUTABLE")
         candidate = Path(sys.executable).parent / "codexd-bridge"
-        executable = candidate if candidate.is_file() else Path(shutil.which("codexd-bridge") or "")
+        executable = (Path(installed) if installed else candidate if candidate.is_file()
+                      else Path(shutil.which("codexd-bridge") or ""))
     executable = Path(executable).expanduser()
     if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ProviderError("provide an existing executable codexd-bridge at an absolute executable path")
-    return executable
+        raise ProviderError("Provide an existing executable file at an absolute --executable path")
+    return executable.resolve()
 
 
 def _launcher_text(executable: Path, registry: Path, name: str) -> str:
@@ -205,13 +208,43 @@ def _existing_launcher(path: Path, text: str) -> bool:
     return True
 
 
-def _remove_own_launcher(path: Path, ident: tuple[int, int]) -> None:
+def _remove_own_launcher(path: Path, ident: tuple[int, int], text: str) -> None:
     try:
         st = os.lstat(path)
-        if (st.st_dev, st.st_ino) == ident:
+        if (st.st_dev, st.st_ino) == ident and path.read_text(encoding="utf-8") == text:
             os.unlink(path)
-    except OSError:
+    except (OSError, UnicodeError):
         pass
+
+
+def install_provider_launcher(name: str, *, launcher_dir: Path | None = None,
+                              executable: Path | None = None, registry_path: Path | None = None) -> dict:
+    """Install the command for an existing route without probing or starting its daemon."""
+    from .installation import installation_operation, remember_registration
+
+    name = _validate_name(name)
+    registry = _resolve_config_path(registry_path)[0].absolute()
+    routes = load_backends(registry)
+    if name not in routes:
+        raise ProviderError(f"backend {name!r} not found; create or attach it first")
+    executable = _resolve_executable(executable)
+    directory = _expand_user(Path(launcher_dir) if launcher_dir is not None else DEFAULT_LAUNCHER_DIR,
+                             "launcher_dir")
+    if not directory.is_absolute():
+        raise ProvisioningError("launcher_dir must be an absolute path after '~' expansion")
+    launcher = directory / f"{_LAUNCHER_PREFIX}{name}"
+    text = _launcher_text(executable, registry, name)
+    ident = None
+    with installation_operation(executable):
+        try:
+            if not _existing_launcher(launcher, text):
+                ident = _install_launcher(launcher, text)
+            remember_registration(routes[name].home, executable, registry, launcher=launcher)
+        except BaseException:
+            if ident is not None:
+                _remove_own_launcher(launcher, ident, text)
+            raise
+        return {"backend": name, "launcher": str(launcher), "created": ident is not None}
 
 
 def _ensure_running(backend, timeout: float) -> dict:
@@ -236,12 +269,14 @@ def _ensure_running(backend, timeout: float) -> dict:
     return status
 
 
-def _retry_command(name, registry, launcher_dir_path, executable_path) -> str:
+def _retry_command(name, registry, launcher_dir_path, executable_path, update_skill=False) -> str:
     # --config is a global CLI flag and must precede the 'provider connect' subcommand.
     parts = ["codexd-bridge"]
     if registry != _resolve_config_path(None)[0].absolute():
         parts += ["--config", str(registry)]
     parts += ["provider", "connect", name]
+    if update_skill:
+        parts.append("--update-skill")
     if launcher_dir_path != _expand_user(DEFAULT_LAUNCHER_DIR, "launcher_dir"):
         parts += ["--launcher-dir", str(launcher_dir_path)]
     try:
@@ -260,6 +295,7 @@ def connect_provider(
     executable: Path | None = None,
     registry_path: Path | None = None,
     timeout: float = 60,
+    update_skill: bool = False,
     client_factory=AppServer,
     progress: Callable[[str], None] | None = None,
 ) -> dict:
@@ -287,7 +323,7 @@ def connect_provider(
         raise ProvisioningError("launcher_dir must be an absolute path after '~' expansion")
     launcher_path = launcher_dir_path / f"{_LAUNCHER_PREFIX}{name}"
     text = _launcher_text(executable_path, registry, name)
-    present = _existing_launcher(launcher_path, text)
+    _existing_launcher(launcher_path, text)
     ident = None
     try:
         _progress_stage(progress, "daemon")
@@ -295,7 +331,7 @@ def connect_provider(
         _progress_stage(progress, "verification")
         verification = check_model(backend, timeout=timeout, client_factory=client_factory)
         _progress_stage(progress, "integration")
-        skill = install_skill(backend.home)
+        skill = install_skill(backend.home, update=update_skill)
         registration = register_bridge(
             backend.home, executable_path, registry, client_factory=client_factory
         )
@@ -304,17 +340,23 @@ def connect_provider(
                 "MCP registration is not effective; "
                 + str(registration.get("warning") or "check tool discovery and configuration policy")
             )
-        _progress_stage(progress, "launcher")
-        if not present:
-            ident = _install_launcher(launcher_path, text)
-        set_backend_enabled(name, True, registry_path=registry)
+        from .installation import installation_operation, remember_registration
+
+        with installation_operation(executable_path):
+            _progress_stage(progress, "launcher")
+            # Verification can take time; the preflight result is no longer current.
+            if not _existing_launcher(launcher_path, text):
+                ident = _install_launcher(launcher_path, text)
+            remember_registration(backend.home, executable_path, registry, launcher=launcher_path)
+            set_backend_enabled(name, True, registry_path=registry, expected_backend=backend)
     except BaseException as error:
         if ident is not None:
-            _remove_own_launcher(launcher_path, ident)
+            _remove_own_launcher(launcher_path, ident, text)
         if isinstance(error, (BridgeError, ValueError, OSError)):
             raise ProviderError(
                 f"provider {name!r} connect failed; route state preserved and no new launcher "
-                f"installed. Retry with: {_retry_command(name, registry, launcher_dir_path, executable_path)}. "
+                f"installed. Retry with: {_retry_command(name, registry, launcher_dir_path, executable_path, update_skill)}. "
+                f"If the connection settings are wrong, correct {backend.home / 'config.toml'} before retrying. "
                 f"Cause: {error}",
                 detail=str(error),
             ) from error
@@ -359,6 +401,9 @@ def add_provider(
     With ``progress``, reports 'configuration' after validation just before home
     creation, then forwards the callback to connect_provider for its stages.
     """
+    if (isinstance(timeout, bool) or not isinstance(timeout, int | float)
+            or not math.isfinite(timeout) or timeout <= 0):
+        raise ProvisioningError("timeout must be a positive finite number of seconds")
     name = _validate_name(name)
     base_url = _base_url(base_url, f"provider {name!r}")
     env_key = _env_name(env_key, f"provider {name!r}: field 'env_key'")
@@ -366,8 +411,8 @@ def add_provider(
     effort = None if effort is None else _text(effort, "effort")
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window < 1:
         raise ProvisioningError("context_window must be a positive integer; a finite bound is required")
-    if wire_api not in _WIRE_APIS:
-        raise ProvisioningError("wire_api must be 'chat' or 'responses'")
+    if wire_api != "responses":
+        raise ProvisioningError("wire_api must be 'responses'; this Codex version no longer supports Chat Completions")
     compact = context_window * 8 // 10
 
     registry = _resolve_config_path(registry_path)[0].absolute()
@@ -448,7 +493,7 @@ def _first_positional(argv: list[str]) -> str | None:
     while i < n:
         tok = argv[i]
         if tok == "--":
-            return argv[i + 1] if i + 1 < n else None
+            return None  # Following words are prompt text, even when they name a command.
         if not tok.startswith("-") or tok == "-":
             return tok
         if tok.startswith("--"):
@@ -524,7 +569,8 @@ def run_provider(
 
     'server start|status|stop' maps to the lifecycle. Interactive TUI and
     resume/fork/agents/queue attach to the route's own daemon via --remote; other
-    subcommands and help pass through natively. Provider/profile/OSS overrides and
+    subcommands, help and explicit --no-daemon mode pass through natively.
+    Provider/profile/OSS overrides and
     --remote to other endpoints are refused. No automatic restart.
     """
     argv = list(args)
@@ -541,8 +587,10 @@ def run_provider(
     socket_url = "unix://" + str(backend.socket_path)
     has_remote = _enforce_binding(argv, socket_url)
     sub = _leading_subcommand(argv)
-    if any(a in _HELP_FLAGS for a in argv) or (sub is not None and sub not in _ATTACH):
-        if sub in ("exec", "e", "review"):
+    options = argv[:argv.index("--")] if "--" in argv else argv
+    standalone = "--no-daemon" in options
+    if standalone or any(a in _HELP_FLAGS for a in options) or (sub is not None and sub not in _ATTACH):
+        if standalone or sub in ("exec", "e", "review"):
             _check_start_binding(backend, backend.home)
         return exec_runner("codex", ["codex", *argv], env)
     _ensure_running(backend, timeout)

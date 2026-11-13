@@ -31,6 +31,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import tomllib
@@ -62,7 +63,6 @@ _BUILTIN_PROVIDERS = frozenset({"openai"})
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HEADER_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 _BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
-_WIRE_APIS = frozenset({"chat", "responses"})
 
 # Vetted, non-secret provider connection fields. Anything else in a template
 # provider table (api_key, http_headers, ...) is refused, never copied.
@@ -195,16 +195,18 @@ def _env_name(value: object, field: str) -> str:
 
 
 def _base_url(value: object, context: str) -> str:
-    if not isinstance(value, str) or not value.strip() or any(ch.isspace() for ch in value):
+    if (not isinstance(value, str) or not value.strip()
+            or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)):
         raise ProvisioningError(f"{context}: field 'base_url' must be a non-empty URL string")
     if len(value) > 2048:
         raise ProvisioningError(f"{context}: field 'base_url' is too long")
     try:
         parts = urlsplit(value)
         userinfo = parts.username is not None or parts.password is not None
+        parts.port  # Validate numeric syntax and the port range before creating a home.
     except ValueError:
         raise ProvisioningError(f"{context}: field 'base_url' is not a valid URL") from None
-    if parts.scheme not in ("http", "https") or not parts.netloc:
+    if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ProvisioningError(f"{context}: field 'base_url' must be an http(s) URL")
     if userinfo:
         raise ProvisioningError(f"{context}: field 'base_url' must not embed credentials")
@@ -239,9 +241,9 @@ def _copy_provider(provider: str, definition: object) -> dict:
         elif field == "env_key":
             copied[field] = _env_name(value, f"{context}: field 'env_key'")
         elif field == "wire_api":
-            if not isinstance(value, str) or value not in _WIRE_APIS:
+            if value != "responses":
                 raise ProvisioningError(
-                    f"{context}: field 'wire_api' must be 'chat' or 'responses'"
+                    f"{context}: field 'wire_api' must be 'responses'; Chat Completions is no longer supported"
                 )
             copied[field] = value
         elif field == "requires_openai_auth":
@@ -341,7 +343,7 @@ def _registry_lock(registry: Path):
     """Serialize registry read-modify-write across processes and threads."""
     registry.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = registry.with_name(registry.name + ".lock")
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -383,6 +385,19 @@ def _backend_from_entry(name: str, entry: dict) -> Backend:
 
 
 def _register(registry: Path, name: str, entry: dict) -> None:
+    # The script launcher supplies its stable executable path. Reject daemon data
+    # inside that application before it can be lost during a later uninstall,
+    # including homes that have not yet connected and acquired ownership records.
+    executable = os.environ.get("CODEXD_BRIDGE_EXECUTABLE")
+    if executable:
+        from .installation import script_installation
+
+        installation = script_installation(Path(executable))
+        if installation is not None:
+            root = Path(installation["root"]).resolve()
+            if any(path.resolve().is_relative_to(root) for path in
+                   (registry, Path(entry["home"]).expanduser())):
+                raise ProvisioningError("Keep daemon homes and the registry outside the bridge application directory")
     with _registry_lock(registry):
         data = _load_registry(registry)
         existing = data["backends"]
@@ -714,6 +729,7 @@ def set_backend_enabled(
     enabled: bool,
     *,
     registry_path: Path | None = None,
+    expected_backend: Backend | None = None,
 ) -> Backend:
     """Enable or disable one registered route; preserve every other entry.
 
@@ -722,7 +738,8 @@ def set_backend_enabled(
     the target are preserved verbatim. The bridge performs no model probing and
     starts no daemon here: callers enable a route after their own availability
     verification. Returns the updated Backend. Setting the value it already has
-    is a no-op that leaves the registry file byte-identical.
+    is a no-op that leaves the registry file byte-identical. When supplied,
+    expected_backend must still match the route that the caller verified.
     """
     if not isinstance(name, str) or not _BACKEND_NAME_RE.fullmatch(name):
         raise ProvisioningError(
@@ -743,6 +760,8 @@ def set_backend_enabled(
             if name not in existing:
                 raise ProvisioningError(f"backend {name!r} not found in the registry")
             entry = dict(existing[name])
+            if expected_backend is not None and _backend_from_entry(name, entry) != expected_backend:
+                raise ProvisioningError("Backend changed during verification; reconnect to verify its current configuration")
             if entry.get("enabled", True) == enabled:
                 return _backend_from_entry(name, entry)
             entry["enabled"] = enabled
@@ -773,15 +792,25 @@ def _write_action_log(
     try:
         log_dir = home / "daemon-logs"
         log_dir.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(log_dir, 0o700)
-        path = log_dir / f"daemon-{action}.log"
-        text = "stdout:\n" + _decoded(stdout) + "\nstderr:\n" + _decoded(stderr) + "\n"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        directory = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            os.fchmod(fd, 0o600)
-            _write_all(fd, text.encode("utf-8", errors="replace"))
+            os.fchmod(directory, 0o700)
+            path = log_dir / f"daemon-{action}.log"
+            text = "stdout:\n" + _decoded(stdout) + "\nstderr:\n" + _decoded(stderr) + "\n"
+            fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return None
+                # Inspect the opened file before changing permissions or truncating it.
+                os.fchmod(fd, 0o600)
+                os.ftruncate(fd, 0)
+                _write_all(fd, text.encode("utf-8", errors="replace"))
+            finally:
+                os.close(fd)
         finally:
-            os.close(fd)
+            os.close(directory)
         return path
     except OSError:
         return None

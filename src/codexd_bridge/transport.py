@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -17,18 +19,31 @@ class BridgeError(RuntimeError):
     """An operation failed without an automatic retry or provider fallback."""
 
 
+@contextmanager
+def control_socket_path(home: Path):
+    """Address native sockets in long directories within Linux's 108-byte Unix path limit."""
+    path = home / "app-server-control/app-server-control.sock"
+    if len(os.fsencode(path)) < 108:
+        yield str(path)
+        return
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # Keep the directory open until connect finishes; no link or cwd change is needed.
+        yield f"/proc/self/fd/{directory}/{path.name}"
+    finally:
+        os.close(directory)
+
+
 class AppServer:
     def __init__(self, home: Path, timeout: float = 25):
         self.home = home.resolve()
         self.timeout = timeout
         self.next_id = 0
         try:
-            self.socket = unix_connect(
-                str(self.home / "app-server-control/app-server-control.sock"),
-                uri="ws://localhost",
-                open_timeout=5,
-                max_size=64 * 1024 * 1024,
-            )
+            with control_socket_path(self.home) as path:
+                self.socket = unix_connect(
+                    path, uri="ws://localhost", open_timeout=5, max_size=64 * 1024 * 1024,
+                )
         except (OSError, TimeoutError, InvalidHandshake) as error:
             raise BridgeError(
                 f"Cannot connect to App Server at {self.home}; start it first"

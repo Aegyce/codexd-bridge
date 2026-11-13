@@ -173,8 +173,6 @@ def load_backends(path: Path | None = None) -> dict[str, Backend]:
     backends = data["backends"]
     if not isinstance(backends, dict):
         raise ConfigError("top-level field 'backends' must be a table of backend definitions")
-    if not backends:
-        raise ConfigError("top-level field 'backends' must define at least one backend")
     return {name: _parse_backend(name, entry) for name, entry in backends.items()}
 
 

@@ -35,10 +35,17 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     failed = await session.call_tool("list_models", {"backend": "demo"})
                     self.assertTrue(failed.is_error)
                     self.assertIn("Cannot connect to App Server", failed.content[0].text)
+                    paged = await session.call_tool("read_messages", {
+                        "backend": "demo", "thread_id": "thread", "turn_id": "turn",
+                        "cursor": '{"requestedThreadId":"thread","rolloutOrdinal":1}',
+                    })
+                    self.assertTrue(paged.is_error)
+                    self.assertIn("Cannot connect to App Server", paged.content[0].text)
                     unknown = await session.call_tool("list_models", {"backend": "missing"})
                     self.assertTrue(unknown.is_error)
                     self.assertIn("Unknown backend", unknown.content[0].text)
-                    for extra in ({}, {"ctx": {"threadId": "forged"},
+                    for extra in ({}, {"acceptance_criteria": '{"tests":"pass"}'},
+                                  {"ctx": {"threadId": "forged"},
                                        "caller": "forged"}):
                         denied = await session.call_tool("create_session", {
                             "backend": "demo", "prompt": "Do work", "title": "Test",
@@ -67,6 +74,9 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "prompt": "Task", "title": "Test", "ctx": {"threadId": "forged"}})
                     self.assertTrue(result.is_error)
                     self.assertIn("Caller identity is unavailable", result.content[0].text)
+                    paged = await session.call_tool("list_sessions", {"cursor": '{"ordinal":1}'})
+                    self.assertTrue(paged.is_error)
+                    self.assertIn("Cannot connect to App Server", paged.content[0].text)
 
 
 if __name__ == "__main__":

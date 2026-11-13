@@ -1,16 +1,54 @@
-"""Transport failure tests use mock sockets and never contact a daemon."""
+"""Transport tests use mocks and a local socket fixture; never contact a user daemon."""
 
 import json
+import os
+import socket
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
+from websockets.sync.server import unix_serve
 
+from codexd_bridge.removal import _running
 from codexd_bridge.transport import AppServer, BridgeError
 
 
 class RpcTests(unittest.TestCase):
+    def test_long_unicode_home_connects_and_removal_detects_its_listener(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ("目录" * 20)
+            control = home / "app-server-control"
+            control.mkdir(parents=True)
+            descriptor = os.open(control, os.O_RDONLY | os.O_DIRECTORY)
+            listener = socket.socket(socket.AF_UNIX)
+            try:
+                listener.bind(f"/proc/self/fd/{descriptor}/app-server-control.sock")
+                listener.listen()
+            finally:
+                os.close(descriptor)
+
+            def handler(connection):
+                for message in connection:
+                    request = json.loads(message)
+                    if "id" in request:
+                        result = {"codexHome": str(home)} if request["method"] == "initialize" else {"ok": True}
+                        connection.send(json.dumps({"id": request["id"], "result": result}))
+
+            with unix_serve(handler, sock=listener, logger=Mock()) as server:
+                worker = threading.Thread(target=server.serve_forever)
+                worker.start()
+                try:
+                    self.assertTrue(_running(home))
+                    with AppServer(home) as client:
+                        self.assertEqual(client.call("thread/list", {}), {"ok": True})
+                finally:
+                    server.shutdown()
+                    worker.join(timeout=5)
+            self.assertFalse(_running(home))
+
     def client(self):
         client = AppServer.__new__(AppServer)
         client.next_id = 0

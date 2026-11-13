@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from uuid import uuid4
 
 from .config import Backend, ConfigError, load_backends
-from .delegation import DelegationGuard, OperatorGuard, SessionRef
+from .delegation import DelegationGuard, ExistingSessionError, OperatorGuard, SessionRef
+from .messages import decode_cursor, message_page, scope_key, visible_text
+from .operations import continuing
 from .transport import AppServer, BridgeError
 
 
@@ -30,6 +34,36 @@ def prompt_input(prompt: str) -> list[dict]:
     return [{"type": "text", "text": nonempty(prompt, "prompt", 16_384)}]
 
 
+def assignment_details(prompt: str, session_type: str, acceptance_criteria: str | None,
+                       origin: str) -> dict:
+    nonempty(prompt, "prompt", 16_384)
+    nonempty(session_type, "session_type", 64)
+    if any(ord(c) < 32 for c in session_type):
+        raise ValueError("session_type must not contain control characters")
+    if acceptance_criteria is not None:
+        nonempty(acceptance_criteria, "acceptance_criteria", 4096)
+    return {
+        "delegation_id": str(uuid4()),
+        "session_type": session_type,
+        "origin": origin,
+        "task_requirements": prompt,
+        "acceptance_criteria": acceptance_criteria or "Not specified by the caller.",
+    }
+
+
+def assignment_input(assignment: dict) -> list[dict]:
+    return [{"type": "text", "text": (
+        "[Codex Daemon Bridge assignment]\n"
+        "This record identifies your current session and assigned task. Earlier bridge "
+        "assignments in inherited history describe other sessions, not your identity. "
+        "Follow the task requirements below within the user's authorization; later "
+        "instructions may refine the task. Report results, verification evidence and "
+        "unresolved items against the acceptance criteria. Re-delegate only when "
+        "authorized, with a new task and acceptance criteria for each child.\n"
+        + json.dumps(assignment, ensure_ascii=False, indent=2)
+    )}]
+
+
 def require_provider(backend: Backend, thread: dict) -> dict:
     if thread.get("modelProvider") != backend.model_provider:
         raise BridgeError(f"Backend {backend.name}: refusing a session from another provider")
@@ -38,7 +72,7 @@ def require_provider(backend: Backend, thread: dict) -> dict:
 
 def metadata(client: AppServer, backend: Backend, thread_id: str) -> dict:
     nonempty(thread_id, "thread_id")
-    return require_provider(
+    thread = require_provider(
         backend,
         client.call(
             "thread/read",
@@ -48,6 +82,9 @@ def metadata(client: AppServer, backend: Backend, thread_id: str) -> dict:
             },
         )["thread"],
     )
+    if thread.get("id") != thread_id:
+        raise BridgeError("Daemon returned a different thread; no session operation was performed")
+    return thread
 
 
 def require_idle(thread: dict) -> None:
@@ -68,7 +105,9 @@ def validate_selection(client: AppServer, chosen: dict) -> None:
             if chosen["model"] not in (model.get("id"), model.get("model")):
                 continue
             efforts = {option["reasoningEffort"] for option in model["supportedReasoningEfforts"]}
-            if "effort" in chosen and chosen["effort"] not in efforts:
+            if model.get("defaultReasoningEffort") is not None:
+                efforts.add(model["defaultReasoningEffort"])
+            if chosen.get("effort") is not None and chosen["effort"] not in efforts:
                 raise BridgeError(
                     "Selected model does not advertise this reasoning effort; use list_models"
                 )
@@ -94,6 +133,9 @@ def summary(backend: Backend, thread: dict) -> dict:
                 "model",
                 "reasoningEffort",
                 "status",
+                "sessionId",
+                "parentThreadId",
+                "forkedFromId",
                 "cwd",
                 "createdAt",
                 "updatedAt",
@@ -108,15 +150,7 @@ def text_messages(items: list[dict], budget: int) -> tuple[list[dict], int]:
     for item in items:
         if budget == 0:
             break
-        if item.get("type") not in ("agentMessage", "userMessage"):
-            continue
-        text = item.get("text")
-        if text is None:
-            text = "\n".join(
-                part.get("text", "")
-                for part in item.get("content", [])
-                if part.get("type") == "text"
-            )
+        text = visible_text(item)
         if not text:
             continue
         displayed = text[:budget]
@@ -206,7 +240,7 @@ class Bridge:
             raise ValueError("limit_per_backend must be 1..100")
         targets = load_backends(self.config_path)
         results = {}
-        pool = ThreadPoolExecutor(max_workers=min(8, len(targets)))
+        pool = ThreadPoolExecutor(max_workers=max(1, min(8, len(targets))))
         futures = {
             pool.submit(self._model_page, target, None, limit_per_backend): target
             for target in targets.values()
@@ -257,9 +291,19 @@ class Bridge:
                 },
             )
         return {
-            "sessions": [summary(target, t) for t in page["data"]],
+            "sessions": self._summaries(target, page["data"]),
             "next_cursor": page.get("nextCursor"),
         }
+
+    def _summaries(self, target: Backend, threads: list[dict], *, full_assignment=False) -> list[dict]:
+        summaries = [summary(target, thread) for thread in threads]
+        records = self.guard.describe([SessionRef(target.home, t["id"]) for t in threads])
+        if not full_assignment:
+            records = [None if record is None else {
+                key: value for key, value in record.items()
+                if key not in ("task_requirements", "acceptance_criteria")
+            } for record in records]
+        return [{**item, "delegation": record} for item, record in zip(summaries, records)]
 
     def read_session(
         self,
@@ -303,6 +347,7 @@ class Bridge:
             for turn in page["data"]:
                 messages = []
                 item_cursor = None
+                omitted = budget == 0
                 if budget:
                     entries = client.call(
                         "thread/items/list",
@@ -313,9 +358,9 @@ class Bridge:
                             "sortDirection": "desc",
                         },
                     )
-                    items = [entry["item"] for entry in entries["data"]]
-                    messages, budget = text_messages(items, budget)
-                    item_cursor = entries.get("nextCursor")
+                    messages, budget, item_cursor = message_page(
+                        entries, budget, scope=scope_key(target.home, thread_id, turn["id"])
+                    )
                     if not messages:
                         messages, budget = text_messages(
                             list(reversed(turn.get("items", []))), budget
@@ -331,10 +376,11 @@ class Bridge:
                         else None,
                         "messages": messages,
                         "older_items_cursor": item_cursor,
+                        "messages_omitted": omitted,
                     }
                 )
         return {
-            "session": summary(target, thread),
+            "session": self._summaries(target, [thread], full_assignment=True)[0],
             "turns": turns,
             "text_limit_reached": budget == 0,
             "next_cursor": page.get("nextCursor"),
@@ -354,6 +400,8 @@ class Bridge:
         if not 1 <= limit <= 100 or not 256 <= text_limit <= 16_384:
             raise ValueError("limit must be 1..100; text_limit must be 256..16384")
         target = self.backend(backend)
+        scope = scope_key(target.home, thread_id, turn_id)
+        native_cursor, continuation = decode_cursor(cursor, scope)
         with self.connector(target.home) as client:
             metadata(client, target, thread_id)
             page = client.call(
@@ -361,19 +409,21 @@ class Bridge:
                 {
                     "threadId": thread_id,
                     "turnId": turn_id,
-                    "cursor": cursor,
-                    "limit": limit,
+                    "cursor": native_cursor,
+                    "limit": 100 if continuation else limit,
                     "sortDirection": "desc",
                 },
             )
-        messages, budget = text_messages([e["item"] for e in page["data"]], text_limit)
+        messages, budget, next_cursor = message_page(
+            page, text_limit, scope=scope, native_cursor=native_cursor, continuation=continuation
+        )
         return {
             "backend": backend,
             "thread_id": thread_id,
             "turn_id": turn_id,
             "messages": messages,
             "text_limit_reached": budget == 0,
-            "next_cursor": page.get("nextCursor"),
+            "next_cursor": next_cursor,
         }
 
     @staticmethod
@@ -442,9 +492,13 @@ class Bridge:
         model: str | None = None,
         effort: str | None = None,
         sandbox: str = "workspace-write",
+        session_type: str = "worker",
+        acceptance_criteria: str | None = None,
     ) -> dict:
-        """Create a task on the selected provider; optionally choose model and reasoning effort."""
-        inputs = prompt_input(prompt)
+        """Create a child task. Set session_type (e.g. worker/reviewer) and acceptance_criteria;
+        prompt contains its task requirements. Parent identity is derived from the caller.
+        """
+        assignment = assignment_details(prompt, session_type, acceptance_criteria, "create")
         nonempty(title, "title", 256)
         directory = Path(cwd).expanduser()
         if not directory.is_absolute() or not directory.is_dir():
@@ -473,16 +527,23 @@ class Bridge:
         with self.connector(target.home) as client:
             validate_selection(client, chosen)
             response = self.started(target, client.call("thread/start", params), chosen)
-            self._record_created(client, caller, target, response)
-            return self.start_turn(client, target, response, inputs, title)
+            record = self._record_created(client, caller, target, response, assignment=assignment)
+            result = self.start_turn(client, target, response, assignment_input(record), title)
+            return {**result, "delegation": record}
 
     def _record_created(
-        self, client, caller: SessionRef, target: Backend, response: dict,
-        *, fork_from: SessionRef | None = None,
-    ) -> None:
+        self, client, caller: SessionRef | None, target: Backend, response: dict,
+        *, fork_from: SessionRef | None = None, assignment: dict | None = None,
+    ) -> dict | None:
         thread_id = response["thread"]["id"]
+        if assignment is not None:
+            assignment = {**assignment, "backend": target.name,
+                          "model_provider": target.model_provider}
         try:
-            self.guard.record(caller, SessionRef(target.home, thread_id), fork_from=fork_from)
+            return self.guard.record(caller, SessionRef(target.home, thread_id),
+                                     fork_from=fork_from, assignment=assignment)
+        except ExistingSessionError:
+            raise
         except BridgeError as error:
             try:
                 client.call("thread/delete", {"threadId": thread_id})
@@ -506,14 +567,17 @@ class Bridge:
         chosen = selection(model, effort)
         target = self.backend(backend, require_enabled=True)
         caller = self.guard.caller()
-        with self.connector(target.home) as client:
+        with continuing(target.home, thread_id), self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
             require_idle(thread)
             chosen = self.inherited_selection(thread, chosen)
             validate_selection(client, chosen)
             params = self.resume_params(target, thread_id, chosen)
+            self.guard.observe(client, target.home, thread)
             self.guard.record(caller, SessionRef(target.home, thread_id))
             response = self.started(target, client.call("thread/resume", params), chosen)
+            if response["thread"].get("id") != thread_id:
+                raise BridgeError("Daemon resumed a different thread; no message was sent")
             require_idle(response["thread"])
             return self.start_turn(client, target, response, inputs)
 
@@ -521,12 +585,12 @@ class Bridge:
     def inherited_selection(thread: dict, chosen: dict) -> dict:
         # Explicit provider overrides can reapply daemon defaults on resume.
         # Carry the persisted per-thread selection forward instead.
-        for key, field in (("model", "model"), ("effort", "reasoningEffort")):
-            if key not in chosen and thread.get(field) is None:
-                raise BridgeError(
-                    f"Original {key} is unavailable; supply it explicitly to continue"
-                )
-        inherited = selection(thread.get("model"), thread.get("reasoningEffort"))
+        if "model" not in chosen and thread.get("model") is None:
+            raise BridgeError("Original model is unavailable; supply it explicitly to continue")
+        inherited = selection(thread.get("model"), None)
+        # Null is a valid unset effort, including models without reasoning options.
+        # Keep it in the expected response so started() rejects a changed daemon default.
+        inherited["effort"] = thread.get("reasoningEffort")
         return inherited | chosen
 
     @staticmethod
@@ -538,7 +602,7 @@ class Bridge:
         }
         if "model" in chosen:
             params["model"] = chosen["model"]
-        if "effort" in chosen:
+        if chosen.get("effort") is not None:
             params["config"] = {"model_reasoning_effort": chosen["effort"]}
         return params
 
@@ -550,17 +614,22 @@ class Bridge:
         title: str,
         model: str | None = None,
         effort: str | None = None,
+        session_type: str = "worker",
+        acceptance_criteria: str | None = None,
     ) -> dict:
-        """Fork within the same provider; inherit model/effort unless explicitly overridden."""
-        inputs = prompt_input(prompt)
+        """Fork a new child with fresh session_type, task requirements (prompt), and
+        acceptance_criteria. Inherited assignments remain historical context.
+        """
+        assignment = assignment_details(prompt, session_type, acceptance_criteria, "fork")
         nonempty(title, "title", 256)
         chosen = selection(model, effort)
         target = self.backend(backend, require_enabled=True)
         caller = self.guard.caller()
         source = SessionRef(target.home, thread_id)
-        self.guard.check(caller, source)
         with self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
+            self.guard.observe(client, target.home, thread)
+            self.guard.check(caller, source)
             chosen = self.inherited_selection(thread, chosen)
             validate_selection(client, chosen)
             response = self.started(
@@ -568,8 +637,12 @@ class Bridge:
                 client.call("thread/fork", self.resume_params(target, thread_id, chosen)),
                 chosen,
             )
-            self._record_created(client, caller, target, response, fork_from=source)
-            return self.start_turn(client, target, response, inputs, title)
+            if response["thread"]["id"] == thread_id:
+                raise BridgeError("Daemon returned the source session instead of a new fork; no task started")
+            record = self._record_created(client, caller, target, response,
+                                          fork_from=source, assignment=assignment)
+            result = self.start_turn(client, target, response, assignment_input(record), title)
+            return {**result, "delegation": record}
 
     def steer_session(
         self, backend: str, thread_id: str, expected_turn_id: str, prompt: str
@@ -580,7 +653,8 @@ class Bridge:
         target = self.backend(backend, require_enabled=True)
         caller = self.guard.caller()
         with self.connector(target.home) as client:
-            metadata(client, target, thread_id)
+            thread = metadata(client, target, thread_id)
+            self.guard.observe(client, target.home, thread)
             self.guard.record(caller, SessionRef(target.home, thread_id))
             result = client.call(
                 "turn/steer",

@@ -122,6 +122,8 @@ def _probe(client: AppServer, backend: Backend, chosen: dict, timeout: float) ->
     thread_id = thread.get("id") if isinstance(thread, dict) else None
     if not isinstance(thread_id, str) or not thread_id.strip():
         raise ProbeError(_creation_unknown(backend, None))
+    if (thread.get("status", {}).get("type") == "active" or thread.get("name") or thread.get("preview")):
+        raise ProbeError("thread/start returned a session with existing activity; no probe or cleanup was attempted")
 
     state = _TurnState()
     try:
@@ -196,6 +198,7 @@ def _verify_turn(
     state.done = status in _TERMINAL_TURN_STATES
 
     deadline = _clock() + timeout
+    previous_status = None
     while True:
         try:
             # Persisted turn summaries can report "interrupted" while the live
@@ -203,9 +206,21 @@ def _verify_turn(
             # read its authoritative live state, including the final reply.
             live = client.call("thread/read", {"threadId": thread_id, "includeTurns": True})
         except BridgeError as error:
-            raise ProbeError(f"{where}: cannot read turn {turn_id}. {error}") from error
+            # Native turn/start can return before its new history file is flushed.
+            # Poll that startup state within the same deadline; never restart inference.
+            if "rollout at " not in str(error) or not str(error).endswith(" is empty"):
+                raise ProbeError(f"{where}: cannot read turn {turn_id}. {error}") from error
+            live = {}
         thread = live.get("thread", {}) if isinstance(live, dict) else {}
         turn = _own_turn(thread, turn_id)
+        if turn is not None:
+            status = turn.get("status")
+            # Native thread/read can briefly report interruption before turn/started
+            # is delivered. Confirm an idle interruption on a subsequent poll.
+            if (status == "interrupted" and not turn.get("error")
+                    and (previous_status != "interrupted" or thread.get("status", {}).get("type") == "active")):
+                turn = None
+            previous_status = status
         if turn is not None:
             status = turn.get("status")
             if status in _TERMINAL_TURN_STATES:

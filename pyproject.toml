@@ -11,6 +11,17 @@ license = "CC-BY-NC-4.0"
 license-files = ["LICENSE", "COMMERCIAL-LICENSE.md"]
 readme = "README.md"
 dependencies = ["mcp==2.3.0", "websockets==16.1.1", "prompt-toolkit==3.0.53"]
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Repository = "https://github.com/Aegyce/codexd-bridge"
+Issues = "https://github.com/Aegyce/codexd-bridge/issues"
 
 [project.scripts]
 codexd-bridge = "codexd_bridge.cli:main"

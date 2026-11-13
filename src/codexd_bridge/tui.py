@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -25,17 +26,21 @@ from prompt_toolkit.layout import (
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Checkbox, Frame, Label, RadioList, TextArea
 
+from . import __version__
 from .config import load_backends
 from .delegation import OperatorGuard
 from .sessions import Bridge
 
 STAGES = {
-    "configuration": "Create the provider configuration",
+    "configuration": "Prepare the provider configuration",
     "daemon": "Start or connect to the daemon",
     "verification": "Verify a real model response",
     "integration": "Connect the bridge and install its skill",
     "launcher": "Install the launcher and enable the provider",
     "ready": "Ready",
+    "detach": "Disable this daemon's bridge integration",
+    "stop": "Stop the selected daemon",
+    "remove": "Remove its launcher and registration",
 }
 STYLE = Style.from_dict(
     {
@@ -65,10 +70,12 @@ class Field:
 class BridgeUI:
     def __init__(self, registry: Path, *, input=None, output=None, bridge=None):
         self.registry = registry
-        self.bridge = bridge or Bridge(registry, guard=OperatorGuard())
+        self.bridge = bridge or Bridge(registry, guard=OperatorGuard(registry))
         self.routes = {}
         self.selected = None
         self.provider_draft = {}
+        self.setup_draft = {}
+        self.connect_drafts = {}
         self.fields = {}
         self.buttons = {}
         self.screen = ""
@@ -111,7 +118,7 @@ class BridgeUI:
 
         root = HSplit(
             [
-                Label("  CODEXD BRIDGE", style="class:title"),
+                Label("  CODEXD BRIDGE " + __version__, style="class:title"),
                 Label(lambda: "  " + self.title, style="class:subtitle"),
                 Window(height=1),
                 VSplit([Window(width=3), DynamicContainer(self.visible_body), Window(width=3)]),
@@ -350,7 +357,7 @@ class BridgeUI:
             self.text(
                 "Cannot read provider registry",
                 str(error),
-                [("Reload", self.home)],
+                [("Choose registry", self.choose_registry), ("Diagnostics", self.diagnostics), ("Reload", self.home)],
                 back=self.quit,
                 screen="error",
             )
@@ -381,6 +388,7 @@ class BridgeUI:
             return invoke
 
         actions = [
+            ("Set up this Codex", self.setup_codex),
             ("New provider", self.new_provider),
             ("Attach existing", self.attach),
             ("All models", self.all_models),
@@ -390,12 +398,15 @@ class BridgeUI:
                 ("Daemon status", selected(lambda: self.daemon("status"))),
                 ("Start daemon", selected(lambda: self.daemon("start"))),
                 ("Stop daemon", selected(self.confirm_stop)),
+                ("Remove daemon", selected(self.remove_daemon)),
                 ("Connect bridge", selected(self.connect)),
+                ("Install launcher", selected(self.install_launcher)),
                 ("Models", selected(self.models)),
                 ("Sessions", selected(self.sessions)),
                 ("Open Codex", selected(self.open_codex)),
             ]
-        actions += [("Refresh", self.home), ("Quit", self.quit)]
+        actions += [("More tools", selected(self.more_tools) if listing else self.more_tools),
+                    ("Refresh", self.home), ("Quit", self.quit)]
         content = HSplit(
             [
                 Label(
@@ -405,12 +416,79 @@ class BridgeUI:
                 Window(height=1),
                 Frame(listing)
                 if listing
-                else Label("No providers yet. Choose New provider to begin."),
+                else Label("Welcome! Choose Set up this Codex to use your existing account.\n"
+                           "Choose New provider to connect another model service."),
             ]
         )
         self.show(
             "Provider manager", content, actions, focus=listing, back=self.quit, screen="home"
         )
+
+    def setup_codex(self):
+        specs = [
+            Field("home", "Codex directory", os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"),
+                  help="The default is your current Codex. Keep it to enable discovery in new sessions."),
+            Field("name", "Name in the manager", "codex", help="Existing routes are reused."),
+            Field("provider", "Provider", "", choices=(
+                ("", "Use the provider already configured in this directory"),
+                ("openai", "OpenAI / existing ChatGPT or OpenAI account")),
+                  help="For standard Codex without a provider setting, select OpenAI."),
+            Field("update", "Installed bridge guide", "keep", choices=(
+                ("keep", "Install if missing; keep local changes"),
+                ("replace", "Update to this version (replace local guide changes)"))),
+        ]
+
+        def install(data):
+            self.setup_draft = data.copy()
+            directory = Path(data["home"]).expanduser()
+            if not directory.is_absolute() or not directory.is_dir():
+                raise ValueError("Choose an existing absolute Codex directory.")
+            if not data["name"]:
+                raise ValueError("Enter a name for this Codex in the manager.")
+
+            def operation(progress):
+                from .integration import install_bridge
+                from .providers import _resolve_executable
+
+                return install_bridge(directory, _resolve_executable(None), self.registry,
+                                      name=data["name"], provider=data["provider"] or None,
+                                      update_skill=data["update"] == "replace", progress=progress)
+
+            def ready(result):
+                self.selected = result["backend"]
+                self.text("Codex setup complete",
+                          "The model responded, the bridge tools are available, and its guide is enabled.\n\n"
+                          "New Codex sessions using this directory will discover the bridge automatically.\n"
+                          "Existing sessions may need to reconnect to refresh their tools.\n\n"
+                          + str(directory),
+                          [("Open Codex", self.open_codex), ("Provider manager", self.home)],
+                          screen="success")
+
+            def failed(error):
+                message = str(error)
+                if "differing skill content" in message:
+                    message = ("A different bridge guide is already installed. Select Update guide "
+                               "to replace it with this version, or keep it and return to the manager.")
+
+                    def update_guide():
+                        self.setup_draft["update"] = "replace"
+                        self.setup_codex()
+
+                    actions = [("Update guide", update_guide)]
+                else:
+                    if "model_provider" in message and "explicit" in message:
+                        message = ("This directory has no provider selection. Return to setup and "
+                                   "choose OpenAI for standard Codex. For another service, "
+                                   "use New provider in the manager.")
+                    actions = []
+                self.text("Setup incomplete", message, actions + [("Retry setup", self.setup_codex)],
+                          screen="error")
+
+            self.work("Setting up this Codex", operation, ready, failure=failed)
+
+        self.form("Set up this Codex", specs, install, values=self.setup_draft, label="Set up",
+                  intro="Connect your existing Codex with one step. A stopped backend will be started.\n"
+                        "Setup checks the model and installs the tools and guide for future sessions.")
 
     def new_provider(self):
         from .providers import _validate_name
@@ -418,17 +496,11 @@ class BridgeUI:
 
         specs = [
             Field("name", "Provider name", help="Creates a launcher named codex-NAME."),
-            Field("base_url", "API endpoint", help="The provider's full API base URL."),
+            Field("base_url", "API endpoint", help="The provider's full Responses API base URL."),
             Field(
                 "env_key",
                 "API key environment variable",
                 help="Variable name only, for example DEMO_API_KEY. Export it before opening this interface.",
-            ),
-            Field(
-                "wire_api",
-                "API protocol",
-                "responses",
-                choices=(("responses", "Responses"), ("chat", "Chat Completions")),
             ),
             Field("model", "Model ID"),
             Field(
@@ -454,7 +526,7 @@ class BridgeUI:
             ),
         ]
 
-        def review(data):
+        def submit(data):
             self.provider_draft = data.copy()
             _validate_name(data["name"])
             _base_url(data["base_url"], "API endpoint")
@@ -474,27 +546,16 @@ class BridgeUI:
             for key in ("home", "launcher_dir", "model_catalog"):
                 if data[key] and not Path(data[key]).expanduser().is_absolute():
                     raise ValueError(f"{key.replace('_', ' ').title()} must be an absolute path.")
-            summary = (
-                f"Provider     {data['name']}\nEndpoint     {data['base_url']}\nProtocol     {data['wire_api']}\n"
-                f"Credential   {data['env_key']} (variable name only)\nModel        {data['model']}\n"
-                f"Context      {context:,} tokens\nCompaction   {context * 8 // 10:,} tokens\n"
-                f"Launcher     {Path(data['launcher_dir']).expanduser() / ('codex-' + data['name'])}\n\n"
-                "Creation includes one short model request to verify access."
-            )
-            self.text(
-                "Review new provider",
-                summary,
-                [("Create provider", lambda: self.create_provider(data, context))],
-                back=self.new_provider,
-                screen="review",
-            )
+            self.create_provider(data, context)
 
         self.form(
             "Create a provider",
             specs,
-            review,
+            submit,
             values=self.provider_draft,
-            intro="Connection settings stay with an independent Codex home.",
+            label="Create provider",
+            intro="Connection settings stay with an independent Codex home.\n"
+                  "Creation includes one short model request to verify access.",
         )
 
     def create_provider(self, data, context):
@@ -508,7 +569,6 @@ class BridgeUI:
                 data["model"],
                 context,
                 effort=data["effort"] or None,
-                wire_api=data["wire_api"],
                 home=Path(data["home"]).expanduser() if data["home"] else None,
                 launcher_dir=Path(data["launcher_dir"]).expanduser(),
                 model_catalog=Path(data["model_catalog"]).expanduser()
@@ -534,7 +594,7 @@ class BridgeUI:
                 [
                     (
                         "Retry connection",
-                        lambda: self.install_launcher(data["name"], data["launcher_dir"]),
+                        lambda: self.finish_provider_setup(data["name"], data["launcher_dir"]),
                     )
                 ]
                 if retry
@@ -542,7 +602,9 @@ class BridgeUI:
             )
             self.text(
                 "Provider setup incomplete",
-                getattr(error, "detail", None) or str(error),
+                (getattr(error, "detail", None) or str(error))
+                + (f"\n\nIf the connection settings are wrong, correct {route.home / 'config.toml'} "
+                   "before retrying. The existing home is retained." if retry else ""),
                 actions,
                 back=self.new_provider,
                 screen="error",
@@ -572,7 +634,7 @@ class BridgeUI:
             screen="success",
         )
 
-    def open_codex(self):
+    def open_codex(self, args=()):
         from .providers import run_provider
 
         if self.busy:
@@ -587,35 +649,29 @@ class BridgeUI:
             try:
                 code = await run_in_terminal(
                     lambda: run_provider(
-                        name, registry_path=self.registry, exec_runner=native_exec
+                        name, args, registry_path=self.registry, exec_runner=native_exec
                     ),
                     in_executor=True,
                 )
             except (RuntimeError, ValueError, OSError) as error:
                 self.text("Could not open Codex", str(error))
             else:
-                self.home()
-                if code:
-                    self.notice = f"Codex exited with status {code}."
+                if isinstance(code, dict):
+                    self.text("Daemon result", "\n".join(f"{key}: {clean(value)}" for key, value in code.items()))
+                else:
+                    self.home()
+                    if code:
+                        self.notice = f"Codex exited with status {code}."
             finally:
                 self.busy = False
 
         self.worker = self.app.create_background_task(open_native())
 
-    def install_launcher(self, name=None, directory=None):
+    def finish_provider_setup(self, name, directory):
         from .providers import connect_provider
 
-        name = name or self.selected
-        if directory is None:
-            self.form(
-                "Install provider launcher",
-                [Field("directory", "Launcher directory", str(Path.home() / ".local/bin"))],
-                lambda data: self.install_launcher(name, data["directory"]),
-                label="Verify and install",
-            )
-            return
         self.work(
-            "Verifying " + name,
+            "Finishing setup / " + name,
             lambda progress: connect_provider(
                 name,
                 registry_path=self.registry,
@@ -623,8 +679,24 @@ class BridgeUI:
                 progress=progress,
             ),
             self.provider_ready,
-            retry=lambda: self.install_launcher(name, directory),
+            retry=lambda: self.finish_provider_setup(name, directory),
         )
+
+    def install_launcher(self, name=None, directory=None):
+        from .providers import install_provider_launcher
+
+        name = name or self.selected
+        if directory is None:
+            self.form("Install provider launcher",
+                      [Field("directory", "Launcher directory", str(Path.home() / ".local/bin"))],
+                      lambda data: self.install_launcher(name, data["directory"]), label="Install launcher")
+            return
+        self.work("Installing launcher / " + name,
+                  lambda _p: install_provider_launcher(name, registry_path=self.registry,
+                      launcher_dir=Path(directory).expanduser()),
+                  lambda result: self.text("Launcher installed", result["launcher"],
+                      [("Open Codex", self.open_codex)], screen="success"),
+                  retry=lambda: self.install_launcher(name, directory))
 
     def attach(self):
         def save(data):
@@ -661,10 +733,12 @@ class BridgeUI:
             [("Connect bridge", self.connect)],
         )
 
-    def daemon(self, action):
+    def daemon(self, action, *, expected_backend=None):
         from .provisioning import daemon_action
 
         target = self.bridge.backend(self.selected)
+        if expected_backend is not None and target != expected_backend:
+            raise ValueError("The backend changed after selection; refresh and review the action again")
         self.work(
             action.title() + " daemon: " + target.name,
             lambda _p: daemon_action(target, action),
@@ -675,16 +749,143 @@ class BridgeUI:
         )
 
     def confirm_stop(self):
+        target = self.bridge.backend(self.selected)
         self.text(
-            "Stop " + self.selected + "?",
-            "Stopping this daemon can interrupt its active sessions.",
-            [("Stop daemon", lambda: self.daemon("stop"))],
+            "Stop " + target.name + "?",
+            str(target.home) + "\n\nStopping this daemon can interrupt its active sessions.",
+            [("Stop daemon", lambda: self.daemon("stop", expected_backend=target))],
         )
 
+    def remove_daemon(self):
+        from .removal import remove_daemon
+
+        target = self.bridge.backend(self.selected)
+
+        def submit(data):
+            purge = data["data"] == "delete"
+            if purge and data["confirmation"] != target.name:
+                raise ValueError("Type the exact backend name to confirm deleting its data.")
+
+            def removed(result):
+                self.selected = None
+                details = ("Daemon removed. Its data was deleted." if result["data_deleted"] else
+                           "Daemon removed. Configuration, credentials and sessions were retained.\n"
+                           "Use Attach existing to connect it again.")
+                if result["kept_files"]:
+                    details += "\n\nKept modified or unrelated files:\n" + "\n".join(result["kept_files"])
+                self.text("Daemon removed", details, [("Provider manager", self.home)], screen="success")
+
+            self.work("Removing " + target.name,
+                      lambda progress: remove_daemon(target.name, registry_path=self.registry,
+                          purge=purge, expected_backend=target,
+                          launcher_dir=Path(data["launcher_dir"]).expanduser() if data["launcher_dir"] else None,
+                          progress=progress), removed, back=self.home)
+
+        self.form("Remove daemon / " + target.name, [
+            Field("data", "Daemon data", "keep", choices=(
+                ("keep", "Keep configuration and sessions"),
+                ("delete", "Delete configuration, credentials and sessions"))),
+            Field("confirmation", "Type backend name to confirm data deletion"),
+            Field("launcher_dir", "Legacy custom launcher directory (optional)"),
+        ], submit, label="Remove daemon", intro=f"{target.name}\n{target.home}\n\n"
+                  "This stops the selected daemon, including any active tasks, and removes its registration.\n"
+                  "Other daemons and the bridge application remain available.")
+
+    def more_tools(self):
+        actions = [("Create daemon", self.create_daemon), ("Choose registry", self.choose_registry),
+                   ("Diagnostics", self.diagnostics), ("MCP connection", self.mcp_connection),
+                   ("Uninstall bridge", self.confirm_uninstall)]
+        if self.selected:
+            actions += [("Verify model ID", self.verify_model_id), ("Codex arguments", self.codex_arguments)]
+        self.text("More tools", "Additional setup, native Codex and application management.\n\n"
+                  + "Current registry: " + str(self.registry), actions)
+
+    def diagnostics(self):
+        from .diagnostics import diagnose
+
+        def display(result):
+            lines = ["Codex Daemon Bridge " + result["version"], ""]
+            for check in result["checks"]:
+                lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
+                if check["advice"]:
+                    lines.append("  " + check["advice"])
+            self.text("Installation diagnostics", "\n".join(lines),
+                      [("Set up this Codex", self.setup_codex), ("Choose registry", self.choose_registry)],
+                      back=self.more_tools)
+
+        self.work("Checking installation", lambda _p: diagnose(self.registry), display, back=self.more_tools)
+
+    def create_daemon(self):
+        from .provisioning import create_daemon
+
+        def create(data):
+            self.work("Creating daemon", lambda _p: create_daemon(
+                data["name"], Path(data["home"]).expanduser(), data["provider"], data["model"],
+                registry_path=self.registry, effort=data["effort"] or None,
+                template_home=Path(data["template"]).expanduser() if data["template"] else None),
+                self.attached, back=self.more_tools)
+
+        self.form("Create daemon configuration", [Field("name", "Provider alias"),
+            Field("home", "New absolute Codex directory"), Field("provider", "Exact provider ID"),
+            Field("model", "Model ID"), Field("effort", "Reasoning effort (optional)"),
+            Field("template", "Template Codex directory (optional)")], create,
+            label="Create daemon", back=self.more_tools,
+            intro="Create an independent configuration without starting a daemon or making a model request.\n"
+                  "For an external provider, select a template with its connection settings.")
+
+    def choose_registry(self):
+        def choose(data):
+            registry = Path(data["registry"]).expanduser()
+            if not registry.is_absolute():
+                raise ValueError("Choose an absolute registry path.")
+            if registry.exists():
+                load_backends(registry)
+            self.registry = registry
+            self.bridge = Bridge(registry, guard=OperatorGuard(registry))
+            self.selected = None
+            self.home()
+
+        self.form("Choose registry", [Field("registry", "Registry path", str(self.registry))],
+                  choose, back=self.more_tools, label="Open registry")
+
+    def mcp_connection(self):
+        from .providers import _resolve_executable
+
+        command = shlex.join([str(_resolve_executable(None)), "--config", str(self.registry), "serve"])
+        self.text("MCP connection", "Use Set up this Codex or Connect bridge for automatic registration.\n\n"
+                  "For another MCP client, use this stdio server command:\n\n" + command,
+                  back=self.more_tools)
+
+    def verify_model_id(self):
+        from .probe import check_model
+
+        target = self.bridge.backend(self.selected)
+        self.form("Verify model / " + target.name, [Field("model", "Model ID", target.default_model or ""),
+                  Field("effort", "Reasoning effort (optional)")],
+                  lambda data: self.work("Verifying model", lambda _p: check_model(
+                      target, model=data["model"] or None, effort=data["effort"] or None),
+                      lambda _r: self.text("Model verified", "A real response was verified; the temporary session was deleted.")),
+                  label="Run verification", back=self.more_tools, intro="This sends one short model request.")
+
+    def codex_arguments(self):
+        self.form("Native Codex / " + self.selected, [Field("args", "Codex arguments (optional)")],
+                  lambda data: self.open_codex(shlex.split(data["args"])), label="Open Codex",
+                  back=self.more_tools, intro="Arguments go to the selected provider's Codex CLI.\n"
+                  "Provider and remote endpoint overrides remain restricted.")
+
+    def confirm_uninstall(self):
+        self.text("Uninstall Codex Daemon Bridge?",
+                  "Remove the bridge application, its commands and owned integrations.\n"
+                  "Independent daemons keep running; their configuration and sessions are retained.\n\n"
+                  "This action closes the manager. For a pip installation, use its package manager.",
+                  [("Uninstall bridge", lambda: self.app.exit(result="uninstall"))], back=self.more_tools)
+
     def connect(self):
-        update = Checkbox("Update the installed bridge skill", checked=False)
+        key = (str(self.registry.resolve()), self.selected)
+        draft = self.connect_drafts.get(key, {})
+        update = Checkbox("Update the installed bridge skill", checked=draft.get("update_skill", False))
         unattended = Checkbox(
-            "Allow unattended delegation (four session write tools)", checked=False
+            "Allow unattended delegation (four session write tools)", checked=draft.get("unattended", False)
         )
         self.fields = {"update_skill": update, "unattended": unattended}
         content = HSplit(
@@ -706,6 +907,7 @@ class BridgeUI:
             from .providers import _ensure_running, _resolve_executable
 
             target = self.bridge.backend(self.selected)
+            self.connect_drafts[key] = {"update_skill": update.checked, "unattended": unattended.checked}
 
             def operation(progress):
                 progress("daemon")
@@ -724,7 +926,8 @@ class BridgeUI:
                 operation,
                 lambda _r: self.text(
                     "Bridge connected",
-                    f"{target.name} is verified and enabled.",
+                    f"{target.name} is verified and enabled.\n"
+                    "New Codex sessions using this directory can discover the bridge automatically.",
                     [("Install launcher", self.install_launcher), ("Sessions", self.sessions)],
                 ),
                 retry=self.connect,
@@ -803,6 +1006,9 @@ class BridgeUI:
             (r["reasoningEffort"], r["reasoningEffort"])
             for r in model.get("supportedReasoningEfforts") or []
         )
+        default_effort = model.get("defaultReasoningEffort") or ""
+        if default_effort not in {value for value, _label in choices}:
+            choices += ((default_effort, default_effort),)
 
         def verify(data):
             self.work(
@@ -818,7 +1024,7 @@ class BridgeUI:
 
         self.form(
             "Verify model access",
-            [Field("effort", "Reasoning effort", choices=choices)],
+            [Field("effort", "Reasoning effort", default_effort, choices=choices)],
             verify,
             back=self.models,
             label="Run verification",
@@ -878,7 +1084,9 @@ class BridgeUI:
                 "read-only",
                 choices=(("read-only", "Read only"), ("workspace-write", "Workspace write")),
             ),
+            Field("session_type", "Session type", "worker"),
             Field("prompt", "Task", multiline=True),
+            Field("acceptance_criteria", "Acceptance criteria (optional)", multiline=True),
         ]
 
         def create(data):
@@ -896,6 +1104,8 @@ class BridgeUI:
                     data["model"] or None,
                     data["effort"] or None,
                     data["sandbox"],
+                    session_type=data["session_type"],
+                    acceptance_criteria=data["acceptance_criteria"] or None,
                 ),
                 self.accepted,
                 back=self.sessions,
@@ -930,6 +1140,18 @@ class BridgeUI:
             f"State: {session.get('status', {}).get('type', 'unknown')}",
             "",
         ]
+        assignment = session.get("delegation")
+        if assignment:
+            parent = assignment.get("parent")
+            source = assignment.get("fork_source")
+            lines += [f"Assignment: {assignment['delegation_id']}",
+                      f"Type: {assignment['session_type']} / Depth: {assignment['depth']}"]
+            if parent:
+                lines.append(f"Parent: {parent['thread_id']} ({parent['home']})")
+            if source and source != parent:
+                lines.append(f"History source: {source['thread_id']} ({source['home']})")
+            lines += ["Task: " + assignment["task_requirements"],
+                      "Acceptance criteria: " + assignment["acceptance_criteria"], ""]
         for turn in reversed(result["turns"]):
             lines += [f"Turn {turn['id']} / {turn['status']}"]
             if turn.get("error"):
@@ -962,9 +1184,11 @@ class BridgeUI:
 
     def messages(self, thread, turn, cursor=None):
         def display(result):
-            lines = [m["type"] + "\n" + m["text"] for m in result["messages"]]
+            lines = [m["type"] + (" (continued)" if m.get("text_offset") else "")
+                     + "\n" + m["text"] + ("\n[Continues on the next page]" if m.get("truncated") else "")
+                     for m in result["messages"]]
             actions = (
-                [("Older messages", lambda: self.messages(thread, turn, result["next_cursor"]))]
+                [("More messages", lambda: self.messages(thread, turn, result["next_cursor"]))]
                 if result.get("next_cursor")
                 else []
             )
@@ -985,7 +1209,9 @@ class BridgeUI:
         )
 
     def message_session(self, thread, mode, turn=None):
-        fields = [Field("title", "Fork title")] if mode == "fork" else []
+        fields = [Field("title", "Fork title"), Field("session_type", "Session type", "worker"),
+                  Field("acceptance_criteria", "Acceptance criteria (optional)", multiline=True)
+                  ] if mode == "fork" else []
         if mode != "steer":
             fields += [
                 Field("model", "Model (blank keeps the current selection)"),
@@ -1008,6 +1234,8 @@ class BridgeUI:
                         data["title"],
                         data["model"] or None,
                         data["effort"] or None,
+                        session_type=data["session_type"],
+                        acceptance_criteria=data["acceptance_criteria"] or None,
                     )
                 return self.bridge.send_message(
                     self.selected,
@@ -1035,4 +1263,8 @@ def run_ui(registry: Path):
         raise ValueError(
             "The TUI needs an interactive terminal. Run codexd-bridge from a terminal window."
         )
-    BridgeUI(registry).app.run()
+    result = BridgeUI(registry).app.run()
+    if result == "uninstall":
+        from .installation import uninstall_current
+
+        uninstall_current()

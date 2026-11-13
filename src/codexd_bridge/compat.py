@@ -7,7 +7,7 @@ from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from . import __version__
-from .server import public_errors, with_caller_context
+from .server import preserve_literal_arguments, public_errors, with_caller_context
 from .sessions import Bridge
 
 
@@ -50,10 +50,13 @@ def create_server(backend: str, cwd: str, config_path: Path | None = None) -> MC
         title: str,
         cwd: str | None = None,
         model: str | None = None,
-        effort: str = "high",
+        effort: str | None = None,
+        session_type: str = "worker",
+        acceptance_criteria: str | None = None,
     ) -> dict:
         """Create a task, retaining the configured provider."""
-        return bridge.create_session(backend, prompt, title, cwd or default_cwd, model, effort)
+        return bridge.create_session(backend, prompt, title, cwd or default_cwd, model, effort,
+                                     session_type=session_type, acceptance_criteria=acceptance_criteria)
 
     @server.tool()
     @public_errors
@@ -72,11 +75,13 @@ def create_server(backend: str, cwd: str, config_path: Path | None = None) -> MC
     @server.tool()
     @public_errors
     @with_caller_context
-    def fork_session(thread_id: str, prompt: str, title: str) -> dict:
+    def fork_session(thread_id: str, prompt: str, title: str, session_type: str = "worker",
+                     acceptance_criteria: str | None = None) -> dict:
         """Fork a session without changing providers."""
-        return bridge.fork_session(backend, thread_id, prompt, title)
+        return bridge.fork_session(backend, thread_id, prompt, title, session_type=session_type,
+                                   acceptance_criteria=acceptance_criteria)
 
-    return server
+    return preserve_literal_arguments(server)
 
 
 def main() -> None:

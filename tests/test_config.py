@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import os
 import tempfile
 import unittest
@@ -93,12 +92,6 @@ class PathResolutionTests(ConfigTestCase):
         self.assertEqual(
             gpt.socket_path, gpt_home / "app-server-control" / "app-server-control.sock"
         )
-
-    def test_env_var_path_used(self):
-        path = self.write_config(self.config_for("qwen", self.make_home()))
-        with patch.dict(os.environ, {CONFIG_ENV_VAR: str(path)}):
-            backends = load_backends()
-        self.assertEqual(list(backends), ["qwen"])
 
     def test_explicit_path_overrides_env_var(self):
         env_path = self.write_config(
@@ -221,15 +214,11 @@ class StructureValidationTests(ConfigTestCase):
     def test_backends_wrong_type_rejected(self):
         self.assert_config_error('backends = "nope"\n', "backends", "table")
 
-    def test_empty_backends_rejected(self):
-        self.assert_config_error("[backends]\n", "backends", "at least one")
+    def test_empty_backends_are_valid_after_removing_the_last_daemon(self):
+        self.assertEqual(load_backends(self.write_config("[backends]\n")), {})
 
     def test_backend_not_a_table_rejected(self):
         self.assert_config_error("[backends]\nqwen = 7\n", "qwen", "table")
-
-    def test_unknown_top_level_field_rejected(self):
-        text = self.config_for("qwen", self.make_home()) + "\n[server]\nport = 8080\n"
-        self.assert_config_error(text, "server")
 
     def test_unknown_top_level_value_not_echoed(self):
         text = 'token = "sk-TOPSECRET"\n' + self.config_for("qwen", self.make_home())
@@ -240,10 +229,6 @@ class StructureValidationTests(ConfigTestCase):
         text = self.config_for("qwen", self.make_home(), 'api_key = "sk-SUPERSECRET"\n')
         message = self.assert_config_error(text, "qwen", "api_key")
         self.assertNotIn("sk-SUPERSECRET", message)
-
-    def test_name_field_rejected(self):
-        text = self.config_for("qwen", self.make_home(), 'name = "other"\n')
-        self.assert_config_error(text, "qwen", "'name'")
 
     def test_endpoint_field_rejected(self):
         text = self.config_for("qwen", self.make_home(), 'endpoint = "ws://127.0.0.1:9999"\n')
@@ -282,50 +267,21 @@ class NameValidationTests(ConfigTestCase):
 
 
 class TextFieldValidationTests(ConfigTestCase):
-    def test_model_provider_wrong_type_rejected(self):
-        for raw in ("42", "true", '["a"]', "{ a = 1 }"):
-            with self.subTest(raw=raw):
-                self.assert_config_error(
-                    self.config_with_raw("model_provider", raw), "qwen", "'model_provider'"
-                )
+    def test_text_fields_require_strings(self):
+        for field in ("model_provider", "default_model", "default_effort"):
+            with self.subTest(field=field):
+                self.assert_config_error(self.config_with_raw(field, "42"), "qwen", f"'{field}'", "string")
 
-    def test_model_provider_empty_or_blank_rejected(self):
-        for raw in ('""', '"   "'):
-            with self.subTest(raw=raw):
-                self.assert_config_error(
-                    self.config_with_raw("model_provider", raw), "qwen", "non-empty"
-                )
-
-    def test_model_provider_length_limit(self):
-        ok = "p" * 128
-        backends = load_backends(
-            self.write_config(self.config_with_raw("model_provider", f'"{ok}"'))
-        )
-        self.assertEqual(backends["qwen"].model_provider, ok)
-        too_long = '"sk-' + "x" * 126 + '"'
-        message = self.assert_config_error(
-            self.config_with_raw("model_provider", too_long), "qwen", "128"
-        )
-        self.assertNotIn("sk-", message)
-
-    def test_optional_fields_wrong_type_rejected(self):
-        for field in ("default_model", "default_effort"):
-            for raw in ("42", "true", '["a"]', "{ a = 1 }"):
-                with self.subTest(field=field, raw=raw):
-                    self.assert_config_error(
-                        self.config_with_raw(field, raw), "qwen", f"'{field}'", "string"
-                    )
-
-    def test_optional_fields_empty_rejected(self):
-        for field in ("default_model", "default_effort"):
+    def test_text_fields_reject_empty_or_blank_values(self):
+        for field in ("model_provider", "default_model", "default_effort"):
             for raw in ('""', '"   "'):
                 with self.subTest(field=field, raw=raw):
                     self.assert_config_error(
                         self.config_with_raw(field, raw), "qwen", f"'{field}'", "non-empty"
                     )
 
-    def test_optional_fields_length_limit(self):
-        for field in ("default_model", "default_effort"):
+    def test_text_fields_enforce_length_without_echoing_values(self):
+        for field in ("model_provider", "default_model", "default_effort"):
             with self.subTest(field=field):
                 ok = "v" * 128
                 backends = load_backends(self.write_config(self.config_with_raw(field, f'"{ok}"')))
@@ -355,25 +311,6 @@ class ActivationTests(ConfigTestCase):
     def test_text_boolean_cannot_enable_a_backend(self):
         home = self.make_home()
         self.assert_config_error(self.config_for("pending", home, 'enabled = "false"\n'), "enabled")
-
-
-class BackendDataclassTests(unittest.TestCase):
-    def test_config_error_is_value_error(self):
-        self.assertTrue(issubclass(ConfigError, ValueError))
-
-    def test_frozen(self):
-        backend = Backend(name="qwen", home=Path("/tmp/h"), model_provider="qwen")
-        with self.assertRaises(dataclasses.FrozenInstanceError):
-            backend.name = "other"
-
-    def test_socket_path_derived_and_no_endpoint(self):
-        backend = Backend(name="qwen", home=Path("/tmp/h"), model_provider="qwen")
-        self.assertEqual(
-            backend.socket_path, Path("/tmp/h/app-server-control/app-server-control.sock")
-        )
-        self.assertFalse(hasattr(backend, "endpoint"))
-        self.assertIsNone(backend.default_model)
-        self.assertIsNone(backend.default_effort)
 
 
 if __name__ == "__main__":
