@@ -27,6 +27,7 @@ def create_server(config_path: Path | None = None) -> MCPServer:
     for name in (
         "list_backends",
         "list_models",
+        "list_provider_models",
         "list_sessions",
         "read_session",
         "read_messages",
@@ -39,6 +40,7 @@ def create_server(config_path: Path | None = None) -> MCPServer:
         read_only = name in (
             "list_backends",
             "list_models",
+            "list_provider_models",
             "list_sessions",
             "read_session",
             "read_messages",

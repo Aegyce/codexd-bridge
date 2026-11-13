@@ -20,7 +20,9 @@ DEFAULT_CONFIG_PATH = "~/.config/codexd-bridge/config.toml"
 
 _BACKEND_NAME_RE = re.compile(r"[a-z][a-z0-9_-]*")
 _MAX_TEXT_LENGTH = 128
-_BACKEND_FIELDS = frozenset({"home", "model_provider", "default_model", "default_effort"})
+_BACKEND_FIELDS = frozenset(
+    {"home", "model_provider", "default_model", "default_effort", "enabled"}
+)
 _REQUIRED_FIELDS = ("home", "model_provider")
 
 
@@ -42,6 +44,7 @@ class Backend:
     model_provider: str
     default_model: str | None = None
     default_effort: str | None = None
+    enabled: bool = True
 
     @property
     def socket_path(self) -> Path:
@@ -139,12 +142,16 @@ def _parse_backend(name: str, entry: object) -> Backend:
         default_effort = _text_field(
             name, "default_effort", entry["default_effort"], max_length=_MAX_TEXT_LENGTH
         )
+    enabled = entry.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"backend {name!r}: field 'enabled' must be a boolean")
     return Backend(
         name=name,
         home=home,
         model_provider=provider,
         default_model=default_model,
         default_effort=default_effort,
+        enabled=enabled,
     )
 
 

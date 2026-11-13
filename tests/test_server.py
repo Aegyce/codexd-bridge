@@ -23,6 +23,7 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         for name in (
             "list_backends",
             "list_models",
+            "list_provider_models",
             "list_sessions",
             "read_session",
             "read_messages",

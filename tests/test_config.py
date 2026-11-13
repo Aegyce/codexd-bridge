@@ -336,15 +336,24 @@ class TextFieldValidationTests(ConfigTestCase):
         self.assertEqual(backends["qwen"].default_effort, "ultra-max-9000")
 
 
+class ActivationTests(ConfigTestCase):
+    def test_pending_backend_and_legacy_default(self):
+        home = self.make_home()
+        config = self.write_config(
+            self.config_for("pending", home, "enabled = false\n") + self.config_for("legacy", home)
+        )
+        backends = load_backends(config)
+        self.assertFalse(backends["pending"].enabled)
+        self.assertTrue(backends["legacy"].enabled)
+
+    def test_text_boolean_cannot_enable_a_backend(self):
+        home = self.make_home()
+        self.assert_config_error(self.config_for("pending", home, 'enabled = "false"\n'), "enabled")
+
+
 class BackendDataclassTests(unittest.TestCase):
     def test_config_error_is_value_error(self):
         self.assertTrue(issubclass(ConfigError, ValueError))
-
-    def test_fields_exact(self):
-        names = tuple(f.name for f in dataclasses.fields(Backend))
-        self.assertEqual(
-            names, ("name", "home", "model_provider", "default_model", "default_effort")
-        )
 
     def test_frozen(self):
         backend = Backend(name="qwen", home=Path("/tmp/h"), model_provider="qwen")

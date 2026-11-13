@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .config import Backend, ConfigError, load_backends
@@ -137,10 +138,14 @@ class Bridge:
         self.config_path = config_path
         self.connector = connector
 
-    def backend(self, name: str) -> Backend:
+    def backend(self, name: str, *, require_enabled: bool = False) -> Backend:
         backends = load_backends(self.config_path)
         if name not in backends:
             raise ConfigError("Unknown backend; use list_backends to select a configured backend")
+        if require_enabled and not backends[name].enabled:
+            raise BridgeError(
+                "Backend is disabled; verify its model and connect it before delegating"
+            )
         return backends[name]
 
     def list_backends(self) -> dict:
@@ -152,6 +157,7 @@ class Bridge:
                     "model_provider": b.model_provider,
                     "default_model": b.default_model,
                     "default_effort": b.default_effort,
+                    "enabled": b.enabled,
                     "socket_exists": (
                         b.home / "app-server-control/app-server-control.sock"
                     ).exists(),
@@ -165,21 +171,70 @@ class Bridge:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be 1..100")
         target = self.backend(backend)
+        return self._model_page(target, cursor, limit)
+
+    def _model_page(self, target: Backend, cursor: str | None, limit: int) -> dict:
         with self.connector(target.home) as client:
             page = client.call("model/list", {"limit": limit, "cursor": cursor})
         keys = (
             "id",
             "model",
             "displayName",
+            "description",
+            "modelSpecialty",
             "isDefault",
             "defaultReasoningEffort",
             "supportedReasoningEfforts",
         )
         return {
-            "backend": backend,
+            "backend": target.name,
+            "model_provider": target.model_provider,
+            "enabled": target.enabled,
+            "source": "app-server/model/list",
+            "availability_checked": False,
             "models": [{k: m.get(k) for k in keys} for m in page["data"]],
             "next_cursor": page.get("nextCursor"),
         }
+
+    def list_provider_models(self, limit_per_backend: int = 20) -> dict:
+        """Dynamically query each provider's daemon; advertised models are not inference proof."""
+        if not 1 <= limit_per_backend <= 100:
+            raise ValueError("limit_per_backend must be 1..100")
+        targets = load_backends(self.config_path)
+        results = {}
+        pool = ThreadPoolExecutor(max_workers=min(8, len(targets)))
+        futures = {
+            pool.submit(self._model_page, target, None, limit_per_backend): target
+            for target in targets.values()
+        }
+        try:
+            for future in as_completed(futures, timeout=45):
+                target = futures[future]
+                try:
+                    results[target.name] = {**future.result(), "reachable": True}
+                except Exception as error:
+                    results[target.name] = {
+                        "backend": target.name,
+                        "model_provider": target.model_provider,
+                        "enabled": target.enabled,
+                        "reachable": False,
+                        "error": str(error)[:500],
+                    }
+        except TimeoutError:
+            pass
+        finally:
+            for future, target in futures.items():
+                if target.name not in results:
+                    future.cancel()
+                    results[target.name] = {
+                        "backend": target.name,
+                        "model_provider": target.model_provider,
+                        "enabled": target.enabled,
+                        "reachable": False,
+                        "error": "Model discovery timed out; query this backend separately",
+                    }
+            pool.shutdown(wait=False, cancel_futures=True)
+        return {"providers": [results[name] for name in targets]}
 
     def list_sessions(self, backend: str, cursor: str | None = None, limit: int = 20) -> dict:
         """List sessions for one explicitly selected backend and provider."""
@@ -378,7 +433,7 @@ class Bridge:
             raise ValueError("cwd must be an existing absolute directory")
         if sandbox not in ("read-only", "workspace-write"):
             raise ValueError("sandbox must be read-only or workspace-write")
-        target = self.backend(backend)
+        target = self.backend(backend, require_enabled=True)
         chosen = selection(
             model if model is not None else target.default_model,
             effort if effort is not None else target.default_effort,
@@ -411,7 +466,7 @@ class Bridge:
         """Continue an idle session, retaining its model/effort unless explicitly overridden."""
         inputs = prompt_input(prompt)
         chosen = selection(model, effort)
-        target = self.backend(backend)
+        target = self.backend(backend, require_enabled=True)
         with self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
             require_idle(thread)
@@ -460,7 +515,7 @@ class Bridge:
         inputs = prompt_input(prompt)
         nonempty(title, "title", 256)
         chosen = selection(model, effort)
-        target = self.backend(backend)
+        target = self.backend(backend, require_enabled=True)
         with self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
             chosen = self.inherited_selection(thread, chosen)
@@ -478,7 +533,7 @@ class Bridge:
         """Add instructions to a specific active turn without changing its provider or model."""
         inputs = prompt_input(prompt)
         nonempty(expected_turn_id, "expected_turn_id")
-        target = self.backend(backend)
+        target = self.backend(backend, require_enabled=True)
         with self.connector(target.home) as client:
             metadata(client, target, thread_id)
             result = client.call(

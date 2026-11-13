@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -21,7 +22,7 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 args=["-m", "codexd_bridge.server", "--config", str(config)],
                 env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
             )
-            async with stdio_client(params) as (reader, writer):
+            async with asyncio.timeout(15), stdio_client(params) as (reader, writer):
                 async with ClientSession(reader, writer) as session:
                     await session.initialize()
                     catalog = await session.list_tools()

@@ -118,6 +118,24 @@ class SessionsTests(unittest.TestCase):
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(self.server.calls[-1][1]["effort"], "max")
 
+    def test_unverified_backend_can_be_inspected_but_cannot_receive_tasks(self):
+        self.targets["qwen"] = Backend("qwen", self.home / "qwen", "qwen", enabled=False)
+        with self.assertRaisesRegex(BridgeError, "disabled"):
+            self.create()
+        self.assertEqual(self.server.calls, [])
+        catalog = self.bridge.list_models("qwen")
+        self.assertFalse(catalog["enabled"])
+        self.assertFalse(catalog["availability_checked"])
+
+    def test_dynamic_model_discovery_preserves_other_providers_when_one_fails(self):
+        self.server.fail_at = "model/list"
+        result = self.bridge.list_provider_models()
+        records = {entry["backend"]: entry for entry in result["providers"]}
+        self.assertFalse(records["qwen"]["reachable"])
+        self.assertTrue(records["openai"]["reachable"])
+        self.assertEqual(records["openai"]["models"][0]["model"], "custom-model")
+        self.assertFalse(records["openai"]["availability_checked"])
+
     def test_resume_and_fork_inherit_thread_not_backend_defaults(self):
         self.targets["qwen"] = Backend("qwen", self.home / "qwen", "qwen", "other", "high")
         self.bridge.send_message("qwen", "owned-thread", "Continue")

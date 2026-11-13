@@ -13,10 +13,13 @@ readme = "README.md"
 dependencies = ["mcp==2.3.0", "websockets==16.1.1"]
 
 [project.scripts]
-codexd-bridge = "codexd_bridge.server:main"
+codexd-bridge = "codexd_bridge.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.data-files]
+"share/codexd-bridge/skills/codexd-bridge" = ["skills/codexd-bridge/SKILL.md"]
 
 [tool.ruff]
 line-length = 100
