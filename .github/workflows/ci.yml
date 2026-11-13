@@ -84,10 +84,10 @@ jobs:
           test -f "$release_dir/codexd_bridge-${version}.tar.gz"
           test -f "$release_dir/codexd_bridge-${version}-py3-none-any.whl"
           (cd "$release_dir" && sha256sum --check SHA256SUMS)
+          (cd "$release_dir" && sha256sum "codexd_bridge-${version}.tar.gz" > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" \
             "$release_dir/codexd_bridge-${version}.tar.gz" \
-            "$release_dir/codexd_bridge-${version}-py3-none-any.whl" \
-            "$release_dir/SHA256SUMS" artifacts/dependency-audit.json \
+            "$release_dir/SHA256SUMS" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
             --title "Codex Daemon Bridge $GITHUB_REF_NAME" \
             --notes-file "$release_dir/release-notes.txt"

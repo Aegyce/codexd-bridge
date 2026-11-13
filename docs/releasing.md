@@ -57,15 +57,16 @@ then uploads the artifacts and audit report.
 Actions are pinned to commit IDs; runtime and check-tool dependencies are hash locked.
 Branch and pull-request checks use read-only repository permissions. A pushed `v*` tag also
 runs a release job after the complete matrix passes. That job alone receives `contents: write`;
-it verifies artifact checksums, uploads the source archive, wheel, checksums and dependency audit
-to a draft, then publishes the release. Ordinary branch pushes do not publish releases.
+it verifies artifact checksums, uploads the source archive and its checksum file to a draft,
+then publishes the release. The wheel and dependency audit remain in CI artifacts.
+Ordinary branch pushes do not publish releases.
 
 Before publishing, require a passing matrix for the candidate commit, the native smoke above,
 reviewed changes and version notes, and checked artifact hashes. Test the actual provider/model
 combinations being advertised. Update this document when the supported matrix changes. A new
 dependency or native Codex version requires these checks again.
 
-GitHub Releases can distribute the source archive, wheel and checksum file. Users downloading
+GitHub Releases distribute the source archive and its checksum file. Users downloading
 the source archive can extract it and execute `./install.sh`; they do not need to navigate into
 the Python package. After explicit release authorization, push an annotated tag matching the
 package version (for example, `v0.4.1`) to start publication. Verify the release job and downloadable
