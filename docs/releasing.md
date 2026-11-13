@@ -55,7 +55,10 @@ availability remains a separate provider-specific check through **Connect bridge
 Python 3.12 additionally audits runtime dependencies, builds and exercises the release archive,
 then uploads the artifacts and audit report.
 Actions are pinned to commit IDs; runtime and check-tool dependencies are hash locked.
-The workflow has read-only repository permissions and does not publish a release.
+Branch and pull-request checks use read-only repository permissions. A pushed `v*` tag also
+runs a release job after the complete matrix passes. That job alone receives `contents: write`;
+it verifies artifact checksums, uploads the source archive, wheel, checksums and dependency audit
+to a draft, then publishes the release. Ordinary branch pushes do not publish releases.
 
 Before publishing, require a passing matrix for the candidate commit, the native smoke above,
 reviewed changes and version notes, and checked artifact hashes. Test the actual provider/model
@@ -64,7 +67,9 @@ dependency or native Codex version requires these checks again.
 
 GitHub Releases can distribute the source archive, wheel and checksum file. Users downloading
 the source archive can extract it and execute `./install.sh`; they do not need to navigate into
-the Python package. Publishing a tag or a public release is a separate maintainer action.
+the Python package. After explicit release authorization, push an annotated tag matching the
+package version (for example, `v0.4.1`) to start publication. Verify the release job and downloadable
+assets before announcing completion; a failed upload can leave an unpublished draft for recovery.
 
 ## Upgrades and support
 

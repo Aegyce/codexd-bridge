@@ -30,6 +30,11 @@ from scripts import manage_install as installer
 
 class DistributionTests(unittest.TestCase):
     def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        for name in ("XDG_CONFIG_HOME", "ZDOTDIR"):
+            os.environ.pop(name, None)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.1 — release candidate
+## 0.4.1
 
 - Refresh owned, enabled MCP registrations after script upgrades, including recognized compatibility
   entries. Update unchanged bundled guides and preserve local edits without restarting daemons.
@@ -17,6 +17,8 @@
   choice. Exercise actual provider onboarding and removal against the local native fixture.
 - Connect to native sockets in long and Unicode home paths through a directory descriptor;
   use the same addressing for daemon removal checks.
+- Isolate shell-profile tests from the runner's configuration directories, and publish versioned
+  GitHub Releases only after the full CI matrix and archive installation checks pass.
 
 ## 0.4.0 — release candidate
 

@@ -11,6 +11,8 @@
 
 ## 安装
 
+从 [GitHub Releases](https://github.com/Aegyce/codexd-bridge/releases) 下载并解压源码包，在解压目录运行 `./install.sh`。也可以通过 Git 获取项目：
+
 ```bash
 git clone https://github.com/Aegyce/codexd-bridge.git
 cd codexd-bridge

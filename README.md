@@ -12,6 +12,9 @@ Create provider launchers, discover models, and delegate tasks across independen
 
 ## Install
 
+Download and extract the source archive from [GitHub Releases](https://github.com/Aegyce/codexd-bridge/releases),
+then run `./install.sh` from the extracted directory. To install from a Git checkout:
+
 ```bash
 git clone https://github.com/Aegyce/codexd-bridge.git
 cd codexd-bridge
