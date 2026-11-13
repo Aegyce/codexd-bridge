@@ -2,18 +2,26 @@
 
 [![English (current)](https://img.shields.io/badge/English-8C2F39?style=flat-square)](README.md) [![简体中文](https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-555555?style=flat-square)](README.zh-CN.md)
 
-Coordinate independent Codex App Server sessions across providers through MCP.
-Create provider launchers, discover models, and delegate tasks across independent daemons.
+Manage independent Codex daemons, discover provider models, and delegate tasks across providers through MCP.
+A keyboard TUI guides setup and everyday operations.
 
 ## Prerequisites
 
 - Linux (including WSL), Python 3.11+ with `venv`, and the `codex` CLI.
-- Provider access through an API key environment variable or an existing configured Codex home.
+- An existing configured Codex home, or provider access through an API key environment variable.
 
 ## Install
 
-Download and extract the source archive from [GitHub Releases](https://github.com/Aegyce/codexd-bridge/releases),
-then run `./install.sh` from the extracted directory. To install from a Git checkout:
+1. Download `codexd_bridge-VERSION.tar.gz` from [GitHub Releases](https://github.com/Aegyce/codexd-bridge/releases).
+2. Extract it and run `./install.sh` from the extracted directory.
+3. Follow the TUI opened by the installer. Later, run `codexd-bridge` from any directory.
+
+The installer creates an independent Python environment and configures the command path for Bash, Zsh or Fish.
+If the command is unavailable in your current terminal, open a new one. Installation needs no `sudo` or
+virtual-environment activation; the downloaded directory can be deleted afterwards.
+
+<details>
+<summary>Install from a Git checkout</summary>
 
 ```bash
 git clone https://github.com/Aegyce/codexd-bridge.git
@@ -21,139 +29,111 @@ cd codexd-bridge
 ./install.sh
 ```
 
-The installer creates an independent Python environment in your user directory,
-installs the locked dependencies, adds the commands to your shell path, and opens
-the TUI when run in a terminal. No `sudo` or virtual-environment activation is
-needed. You can delete the downloaded project after installation. If the command
-is not available in your current shell, open a new terminal; Bash, Zsh and Fish
-startup files are configured automatically.
+For automated installation, use `./install.sh --no-launch`.
 
-To upgrade, run `./install.sh` from the newer download. It refreshes this installation's
-enabled MCP registrations and unmodified bundled guides without restarting daemons.
-A failed build keeps the previous version available. For automated installation,
-use `./install.sh --no-launch`.
+</details>
 
-## Open the manager
+## Connect your existing Codex
 
 ```bash
 codexd-bridge
 ```
 
-On the first screen, choose **Set up this Codex** to connect your existing
-Codex account. Keep the suggested directory and name. Choose the configured
-provider, or select **OpenAI** for standard Codex without an explicit provider
-setting, then choose **Set up**. The interface starts the backend if needed,
-checks model access, installs the guide and registers the tools. When setup
-completes, new Codex sessions using that directory discover the bridge automatically.
-Existing sessions may need to reconnect to refresh their tools.
+1. Choose **Set up this Codex** on the home screen.
+2. Keep the suggested Codex directory and name, or select the existing home you want to connect.
+3. Use its configured provider. For standard Codex without an explicit provider setting, choose **OpenAI**.
+4. Choose **Set up**. The manager starts the backend if needed, verifies model access, installs the guide and registers MCP tools.
 
-For another service, choose **New provider** and follow the form. The service must
-support the Responses API; the supported Codex version no longer accepts Chat Completions.
-If the installer reports a customized guide or an incomplete refresh, open
-**Set up this Codex** and choose **Update to this version** under the installed
-guide options after reviewing your changes. Failed setup keeps your input and provides a retry action in the
-interface. No separate registration command or manual configuration editing is
-needed for these flows.
+New Codex sessions using that home discover the bridge automatically. Existing sessions may need to reconnect.
+Failed setup keeps your input and offers a retry action.
 
-The manager also lets you browse models, manage sessions, start and stop daemons,
-install a `codex-NAME` launcher, and open that provider's native Codex interface.
+![Running TUI: setup form with a demonstration Codex directory](docs/images/tui-setup.png)
 
-Use **Tab / Shift+Tab** to move, **Enter** to choose, **Ctrl+S** to submit,
-**Esc** to go back, and **Ctrl+Q** to exit. All workflows support keyboard
-navigation. The minimum terminal size is 60 columns by 18 rows.
+*Setup form captured from the running TUI with a demonstration directory.*
 
-New providers reference an API key environment variable already exported in the
-terminal; enter its **name**, such as `DEMO_API_KEY`, in the form. The bridge
-never saves the key value. Supply the provider's endpoint, model ID and documented
-context limit. Select **Create provider** once to create the configuration, verify
-a real response, enable the route, and install its launcher. If setup is incomplete,
-use **Retry connection** to finish verification and integration.
+## Add another provider
 
-**Install launcher** only installs the `codex-NAME` command; it does not start a
-daemon or send a model request. The CLI equivalent is
-`codexd-bridge provider launcher NAME`. **Connect bridge** verifies and integrates
-the backend, retaining its selected guide-update and delegation-approval options
-when retrying a failed connection.
+Export the provider's API key environment variable before opening the manager, then choose **New provider**.
+The service must support the Responses API.
 
-The interface shows actual setup stages and keeps running while daemon requests
-complete. **Open Codex** returns to the manager when the native interface closes.
-Stopping a daemon requires confirmation. Unattended delegation is enabled only
-when explicitly selected under **Connect bridge**.
+| Form field | What to enter |
+| --- | --- |
+| Provider name | A short name such as `demo`; its launcher will be `codex-demo` |
+| API endpoint | The provider's Responses API base URL |
+| API key environment variable | The variable **name**, such as `DEMO_API_KEY`; the bridge does not save its value |
+| Model ID | The exact model identifier supplied by the provider |
+| Context limit | The model's documented token limit |
+| Reasoning effort | Optional; leave blank to use the provider default |
 
-For a different registry, run `codexd-bridge --config /absolute/bridge.toml ui`.
-Command-line operations, including `install`, remain available for automation through `--help`.
-MCP clients use `codexd-bridge serve`; the no-argument entry also preserves MCP
-stdio behavior when launched through pipes.
+Choose **Create provider** once to create the configuration, verify a real response, enable the route and
+install its launcher. If setup is incomplete, choose **Retry connection**.
 
-Each created or forked task receives a fresh assignment containing its ID,
-session type, parent and history source, root sessions, depth, task requirements,
-and acceptance criteria. Set `session_type` (for example `worker` or `reviewer`)
-and `acceptance_criteria`; `prompt` supplies the task requirements. Omitted criteria
-are marked as unspecified. The record is included in the first message and
-available through session reads and the manager. A child can fork itself again;
-the new assignment identifies its immediate parent, while inherited assignments
-remain historical context.
+## Everyday operations
 
-Bridge calls cannot dispatch back to the calling session or its recorded
-ancestors. Forking the current session creates a new child. Delegation is limited
-to eight levels by default. For installations managed outside `install.sh`, upgrade
-the package and use **Connect bridge → Update the installed bridge skill** on each backend.
-Older bridge sessions without recorded ancestry need fresh task sessions.
-Existing recorded ancestry is retained when the state file is upgraded; this
-state upgrade cannot be read by older bridge versions.
+Select a backend on the home screen, then choose an action.
 
-Repeated derivation and discovery are covered by automated tests. Discovery is
-also checked with a fresh native thread in an isolated Codex home; this check
-does not run model inference or establish every provider's model availability.
+![Running TUI: provider manager with demonstration backends](docs/images/tui-manager.png)
 
-Common operations are available on the home screen. **More tools** provides daemon
-configuration creation, registry selection, custom model verification, native Codex
-arguments, installation diagnostics, MCP connection details, and bridge uninstallation. Session pages support
-creating, continuing, forking, and steering tasks.
+*The example backends are unverified demonstration entries.*
 
-Run `codexd-bridge doctor` to check the installation and provider configuration without
-making a model request. It prints JSON and exits with status 1 if a check fails.
-Use `codexd-bridge --version` to identify the installed version.
+| Goal | TUI entry | Result |
+| --- | --- | --- |
+| Reuse a Codex home | **Attach existing** | Adds an existing home to the manager |
+| Connect or refresh bridge tools | **Connect bridge** | Verifies model access and installs the guide and MCP integration |
+| Browse or verify models | **Models** / **All models** | Shows one backend or all configured backends |
+| Manage tasks | **Sessions** | Create, continue, fork or steer a task |
+| Check, start or stop a daemon | **Daemon status** / **Start daemon** / **Stop daemon** | Acts on the selected backend |
+| Install `codex-NAME` | **Install launcher** | Installs the command without starting a daemon or requesting a model response |
+| Open native Codex | **Open Codex** | Opens the selected provider; returns to the manager when it closes |
+| Find additional operations | **More tools** | Daemon configuration, registry selection, custom model checks, native arguments, diagnostics, MCP details and uninstall |
 
-## Remove one daemon
+**Keyboard:** `Tab` / `Shift+Tab` move focus · `Enter` selects · `Ctrl+S` submits · `Esc` returns · `Ctrl+Q` exits.
+The minimum terminal size is 60 columns by 18 rows. Stopping a daemon requires confirmation;
+unattended delegation is enabled only when explicitly selected under **Connect bridge**.
 
-Select a backend and choose **Remove daemon**. By default, this stops its daemon
-and removes its registration, bridge integration, and unchanged launcher. Configuration,
-credentials, and sessions are retained for later **Attach existing**. Stopping interrupts
-active tasks on that daemon.
+## Upgrade
 
-```bash
-codexd-bridge daemon remove NAME
-```
+- Run `./install.sh` from the newer download. It refreshes owned, enabled MCP registrations and unchanged bundled guides without restarting daemons. A failed build keeps the working version.
+- If a guide has local edits or refresh is incomplete, review the changes, then use **Set up this Codex → Update to this version**.
+- For other package-manager installations, update the package and use **Connect bridge → Update the installed bridge skill** on each backend.
+- Recorded task ancestry survives state migration. Older bridge versions cannot read the upgraded state; old tasks without recorded ancestry need fresh sessions.
 
-To also delete all of that daemon's data, select deletion in the TUI and type its
-name, or run:
+## Delegate tasks
 
-```bash
-codexd-bridge daemon remove NAME --purge
-```
+- Every created or forked task gets a fresh assignment: ID, session type, parent and history source, root ancestry, depth, task requirements and acceptance criteria.
+- Set `session_type` (such as `worker` or `reviewer`), `prompt` and `acceptance_criteria`. Omitted criteria are marked as unspecified. Assignments appear in the first message and in session reads.
+- Children can fork again, recording their immediate parent. Delegation defaults to eight levels; dispatch back to the caller or its recorded ancestors is rejected. Steer an active task using its current turn ID.
 
-Deletion refuses the default or current Codex home, shared directories, and directories
-containing the bridge executable, registry, or another backend. Failed removal retains
-a disabled registration for retry. Other daemons and the bridge application are retained.
+## Remove a daemon or uninstall the project
 
-## Uninstall the bridge
+| Action | Command | Effect |
+| --- | --- | --- |
+| Remove one daemon | `codexd-bridge daemon remove NAME` | Stops it and removes its registration, bridge integration and unchanged launcher; retains configuration, credentials and sessions |
+| Remove one daemon and its data | `codexd-bridge daemon remove NAME --purge` | Also deletes that daemon's data |
+| Uninstall the bridge | `codexd-bridge uninstall` | Removes the bridge program and owned integrations; retains independent daemons and their data |
 
-```bash
-codexd-bridge uninstall
-```
+- **TUI:** choose **Remove daemon**, or **More tools → Uninstall bridge**. Destructive actions ask for confirmation; data deletion also requires the backend name.
+- Stopping or removing a daemon interrupts its active tasks. Retained data can be reconnected through **Attach existing**; a failed removal leaves a disabled registration for retry.
+- Data deletion refuses protected or shared homes and directories containing the bridge, its registry or another backend.
+- `./uninstall.sh` is an alternative for project removal. Uninstall preserves locally edited guides and unrelated commands.
 
-You can also run `./uninstall.sh` from a downloaded copy. Both commands uninstall
-**the Codex Daemon Bridge project itself**: its program, commands and shell-path
-entries. They disable its registered MCP tools and remove an unchanged bundled
-guide. Independent Codex daemons are neither uninstalled nor stopped; provider
-configuration, credentials and sessions are retained.
-Locally changed guides and unrelated commands are preserved.
+## Command-line reference
 
-Development and release checks: [release guide](docs/releasing.md),
-[architecture](docs/architecture.md), and [changes](CHANGELOG.md).
+| Task | Command |
+| --- | --- |
+| Diagnose installation and provider configuration | `codexd-bridge doctor` |
+| Show the installed version | `codexd-bridge --version` |
+| List automation commands | `codexd-bridge --help` |
+| Open another registry | `codexd-bridge --config /absolute/bridge.toml ui` |
+| Start the MCP stdio entry point | `codexd-bridge serve` |
+
+Diagnostics make no model requests, print JSON and exit with status 1 on errors.
+They are also available under **More tools → Diagnostics**.
+
+See the [release guide](docs/releasing.md) for validation results and unverified platforms/models,
+the [architecture](docs/architecture.md) for session and failure behavior, and the [changelog](CHANGELOG.md) for improvements.
 
 ## License
 
-Original content: [CC BY-NC 4.0](LICENSE); commercial use requires [separate
-written permission](COMMERCIAL-LICENSE.md). Third-party dependencies keep their licenses.
+Original content: [CC BY-NC 4.0](LICENSE); commercial use requires [separate written permission](COMMERCIAL-LICENSE.md).
+Third-party dependencies keep their licenses.
