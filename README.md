@@ -5,9 +5,9 @@
 Manage independent Codex daemons, discover provider models, and delegate tasks across providers through MCP.
 A keyboard TUI guides setup and everyday operations.
 
-![TUI home screen: provider manager and available actions](docs/images/tui-manager.png)
+![Character-based TUI home with Use backend and Manage backends cards](docs/images/tui-home.png)
 
-*Home screen opened by `codexd-bridge`, shown with unverified demonstration backends.*
+*The running home screen with configured Codex environments. The focused card expands slightly and inverts its colors.*
 
 ## Prerequisites
 
@@ -43,7 +43,7 @@ For automated installation, use `./install.sh --no-launch`.
 codexd-bridge
 ```
 
-1. Choose **Set up this Codex** on the home screen.
+1. Choose **Manage backends → Set up this Codex**.
 2. Keep the suggested Codex directory and name, or select the existing home you want to connect.
 3. Use its configured provider. For standard Codex without an explicit provider setting, choose **OpenAI**.
 4. Choose **Set up**. The manager starts the backend if needed, verifies model access, installs the guide and registers MCP tools.
@@ -57,7 +57,7 @@ Failed setup keeps your input and offers a retry action.
 
 ## Add another provider
 
-Export the provider's API key environment variable before opening the manager, then choose **New provider**.
+Export the provider's API key environment variable before opening the manager, then choose **Manage backends → New provider**.
 The service must support the Responses API.
 
 | Form field | What to enter |
@@ -74,27 +74,37 @@ install its launcher. If setup is incomplete, choose **Retry connection**.
 
 ## Everyday operations
 
-Select a backend on the home screen, then choose an action.
+The home screen has two cards:
+
+- **Use backend:** open Codex, browse models and manage sessions.
+- **Manage backends:** add configurations, connect the bridge, manage services and uninstall.
+
+The overview lists your configured Codex environments and their bridge status. When an operation needs a target,
+one configured environment is used directly; with several, choose one and press `Enter`.
+**Daemon status** checks whether its Codex service is running. Closing the manager leaves running services active.
+
+![Running management screen with setup, daemon and tools columns](docs/images/tui-manager.png)
 
 | Goal | TUI entry | Result |
 | --- | --- | --- |
-| Reuse a Codex home | **Attach existing** | Adds an existing home to the manager |
-| Connect or refresh bridge tools | **Connect bridge** | Verifies model access and installs the guide and MCP integration |
-| Browse or verify models | **Models** / **All models** | Shows one backend or all configured backends |
-| Manage tasks | **Sessions** | Create, continue, fork or steer a task |
-| Check, start or stop a daemon | **Daemon status** / **Start daemon** / **Stop daemon** | Acts on the selected backend |
-| Install `codex-NAME` | **Install launcher** | Installs the command without starting a daemon or requesting a model response |
-| Open native Codex | **Open Codex** | Opens the selected provider; returns to the manager when it closes |
-| Find additional operations | **More tools** | Daemon configuration, registry selection, custom model checks, native arguments, diagnostics, MCP details and uninstall |
+| Reuse a Codex home | **Manage backends → Attach existing** | Adds an existing home to the manager |
+| Connect or refresh bridge tools | **Manage backends → Connect bridge** | Verifies model access and installs the guide and MCP integration |
+| Browse or verify models | **Use backend → Models** / **All models** | Shows one backend or all configured backends |
+| Manage tasks | **Use backend → Sessions** | Create, continue, fork or steer a task |
+| Check, start or stop a daemon | **Manage backends → Daemon status** / **Start daemon** / **Stop daemon** | Acts on the selected backend |
+| Install `codex-NAME` | **Manage backends → Install launcher** | Installs the command without starting a daemon or requesting a model response |
+| Open native Codex | **Use backend → Open Codex** | Opens the selected provider; returns to the manager when it closes |
+| Find additional operations | **Manage backends → More tools** | Daemon configuration, registry selection, custom model checks, native arguments, diagnostics, MCP details and uninstall |
 
-**Keyboard:** `Tab` / `Shift+Tab` move focus · `Enter` selects · `Ctrl+S` submits · `Esc` returns · `Ctrl+Q` exits.
+**Keyboard:** `Tab` / `Shift+Tab` switch cards or function areas; `↑` / `↓` select within an area.
+In forms, `Tab` moves between fields. `Enter` selects · `Ctrl+S` submits · `Esc` returns · `Ctrl+Q` exits.
 The minimum terminal size is 60 columns by 18 rows. Stopping a daemon requires confirmation;
 unattended delegation is enabled only when explicitly selected under **Connect bridge**.
 
 ## Upgrade
 
 - Run `./install.sh` from the newer download. It refreshes owned, enabled MCP registrations and unchanged bundled guides without restarting daemons. A failed build keeps the working version.
-- If a guide has local edits or refresh is incomplete, review the changes, then use **Set up this Codex → Update to this version**.
+- If a guide has local edits or refresh is incomplete, review the changes, then use **Manage backends → Set up this Codex → Update to this version**.
 - For other package-manager installations, update the package and use **Connect bridge → Update the installed bridge skill** on each backend.
 - Recorded task ancestry survives state migration. Older bridge versions cannot read the upgraded state; old tasks without recorded ancestry need fresh sessions.
 
@@ -112,7 +122,7 @@ unattended delegation is enabled only when explicitly selected under **Connect b
 | Remove one daemon and its data | `codexd-bridge daemon remove NAME --purge` | Also deletes that daemon's data |
 | Uninstall the bridge | `codexd-bridge uninstall` | Removes the bridge program and owned integrations; retains independent daemons and their data |
 
-- **TUI:** choose **Remove daemon**, or **More tools → Uninstall bridge**. Destructive actions ask for confirmation; data deletion also requires the backend name.
+- **TUI:** enter **Manage backends**, then choose **Remove daemon** or **More tools → Uninstall bridge**. Destructive actions ask for confirmation; data deletion also requires the backend name.
 - Stopping or removing a daemon interrupts its active tasks. Retained data can be reconnected through **Attach existing**; a failed removal leaves a disabled registration for retry.
 - Data deletion refuses protected or shared homes and directories containing the bridge, its registry or another backend.
 - `./uninstall.sh` is an alternative for project removal. Uninstall preserves locally edited guides and unrelated commands.
@@ -128,7 +138,7 @@ unattended delegation is enabled only when explicitly selected under **Connect b
 | Start the MCP stdio entry point | `codexd-bridge serve` |
 
 Diagnostics make no model requests, print JSON and exit with status 1 on errors.
-They are also available under **More tools → Diagnostics**.
+They are also available under **Manage backends → More tools → Diagnostics**.
 
 See the [release guide](docs/releasing.md) for validation results and unverified platforms/models,
 the [architecture](docs/architecture.md) for session and failure behavior, and the [changelog](CHANGELOG.md) for improvements.

@@ -1,6 +1,7 @@
 """Drive the real terminal widgets with pipe input; native operations are mocked."""
 
 import asyncio
+import io
 import json
 import os
 import tempfile
@@ -12,6 +13,8 @@ from unittest.mock import AsyncMock, Mock, patch
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.color_depth import ColorDepth
+from prompt_toolkit.output.vt100 import Vt100_Output
 
 from codexd_bridge.config import Backend
 from codexd_bridge.delegation import DelegationGuard, OperatorGuard
@@ -79,7 +82,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.registry.write_text(
             f'[backends.demo]\nhome={json.dumps(str(home))}\nmodel_provider="demo"\n'
         )
-        self.ui.home()
+        self.ui.manage_backends()
         return Backend("demo", home, "demo")
 
     def rendered(self):
@@ -107,6 +110,9 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_screen_and_keyboard_complete_current_codex_setup(self):
         with patch.dict(os.environ, {"CODEX_HOME": str(self.root)}):
+            self.assertEqual(set(self.ui.buttons), {"Use backend", "Manage backends"})
+            self.pipe.send_text("\t\r")
+            await self.until(lambda: self.ui.screen == "manager")
             self.pipe.send_text("\r")
             await self.until(lambda: self.ui.title == "Set up this Codex")
         self.assertEqual(self.ui.fields["home"].text, str(self.root))
@@ -125,6 +131,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Open Codex", self.ui.buttons)
 
     async def test_setup_failure_keeps_values_and_offers_guide_upgrade_in_ui(self):
+        self.activate("Manage backends")
         self.activate("Set up this Codex")
         self.fill(home=str(self.root), name="current")
         with patch("codexd_bridge.providers._resolve_executable", return_value=self.root / "bridge"), patch(
@@ -140,6 +147,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ui.fields["update"].current_value, "replace")
 
     async def test_setup_missing_provider_offers_a_choice_without_config_editing(self):
+        self.activate("Manage backends")
         self.activate("Set up this Codex")
         self.fill(home=str(self.root))
         with patch("codexd_bridge.providers._resolve_executable", return_value=self.root / "bridge"), patch(
@@ -260,7 +268,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             self.activate("Stop daemon")
             await self.until(lambda: not self.ui.busy)
         action.assert_called_once_with(backend, "stop")
-        self.ui.home()
+        self.ui.manage_backends()
         with patch("codexd_bridge.provisioning.daemon_action") as action:
             self.activate("Stop daemon")
             self.registry.write_text(self.registry.read_text().replace(str(backend.home),
@@ -272,12 +280,15 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_home_and_more_tools_expose_all_management_operations(self):
         self.register()
-        self.assertTrue({"Set up this Codex", "New provider", "Attach existing", "All models",
+        self.assertTrue({"Set up this Codex", "New provider", "Attach existing",
             "Daemon status", "Start daemon", "Stop daemon", "Remove daemon", "Connect bridge",
-            "Install launcher", "Models", "Sessions", "Open Codex", "More tools"}.issubset(self.ui.buttons))
+            "Install launcher", "More tools"}.issubset(self.ui.buttons))
         self.activate("More tools")
         self.assertTrue({"Create daemon", "Choose registry", "Diagnostics", "MCP connection", "Uninstall bridge",
                          "Verify model ID", "Codex arguments"}.issubset(self.ui.buttons))
+        self.ui.home()
+        self.activate("Use backend")
+        self.assertTrue({"Open Codex", "Models", "Sessions", "All models"}.issubset(self.ui.buttons))
 
     async def test_diagnostics_are_accessible_when_registry_is_corrupt(self):
         self.registry.write_text("invalid = [")
@@ -322,31 +333,97 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.registry.write_text("[backends]\n")
         self.ui.home()
         self.assertEqual(self.ui.screen, "home")
+        self.activate("Manage backends")
         self.assertIn("New provider", self.ui.buttons)
         self.assertIsNone(self.ui.selected)
 
-    async def test_all_home_actions_remain_keyboard_accessible_at_minimum_size(self):
+    async def test_group_navigation_keeps_all_actions_visible_at_minimum_size(self):
         self.output.size = Size(rows=18, columns=60)
         self.register()
         visited = set()
-        for _ in range(40):
+        for _ in range(3):
+            first = self.ui.app.layout.current_window
+            for _ in range(10):
+                await asyncio.sleep(.02)
+                for name, button in self.ui.buttons.items():
+                    if self.ui.app.layout.has_focus(button):
+                        visited.add(name)
+                        self.assertIn(name, self.rendered())
+                self.pipe.send_text("\x1b[B")
+                await asyncio.sleep(.02)
+                if self.ui.app.layout.current_window is first:
+                    break
             self.pipe.send_text("\t")
-            await asyncio.sleep(.01)
-            for name, button in self.ui.buttons.items():
-                if self.ui.app.layout.has_focus(button):
-                    visited.add(name)
-                    self.assertIn(name, self.rendered())
-            if visited == set(self.ui.buttons):
-                break
+            await asyncio.sleep(.02)
         self.assertEqual(visited, set(self.ui.buttons))
+        self.pipe.send_text("\x1b[Z")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["More tools"]))
 
     async def test_project_uninstall_is_confirmed_and_runs_after_tui_exit(self):
+        self.activate("Manage backends")
         self.activate("More tools")
         self.activate("Uninstall bridge")
         self.assertFalse(self.task.done())
         self.activate("Uninstall bridge")
         await self.until(self.task.done)
         self.assertEqual(self.task.result(), "uninstall")
+
+    async def test_home_cards_choose_target_only_when_entering_use(self):
+        self.register()
+        with self.registry.open("a") as handle:
+            handle.write(f'\n[backends.other]\nhome={json.dumps(str(self.root / "other"))}\n'
+                         'model_provider="other"\n')
+        self.output.size = Size(rows=18, columns=60)
+        self.ui.home()
+        await asyncio.sleep(.05)
+        for label in ("Use backend", "Manage backends", "Start/stop services"):
+            self.assertIn(label, self.rendered())
+        self.assertEqual(set(self.ui.buttons), {"Use backend", "Manage backends"})
+        self.pipe.send_text("\t")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Manage backends"]))
+        self.pipe.send_text("\x1b[Z\r")
+        await self.until(lambda: self.ui.screen == "backend-picker")
+        self.ui.open_codex = Mock()
+        self.pipe.send_text("\x1b[B\r")
+        await self.until(lambda: self.ui.screen == "use")
+        self.assertEqual(self.ui.selected, "other")
+        self.ui.open_codex.assert_not_called()
+        self.pipe.send_text("\r")
+        await self.until(lambda: self.ui.open_codex.called)
+
+    async def test_service_action_selects_target_then_confirms_stop(self):
+        self.register()
+        with self.registry.open("a") as handle:
+            handle.write(f'\n[backends.other]\nhome={json.dumps(str(self.root / "other"))}\n'
+                         'model_provider="other"\n')
+        self.ui.manage_backends()
+        with patch("codexd_bridge.provisioning.daemon_action") as action:
+            self.activate("Stop daemon")
+            self.assertEqual(self.ui.screen, "backend-picker")
+            self.pipe.send_text("\x1b[B\r")
+            await self.until(lambda: "Stop daemon" in self.ui.buttons)
+            action.assert_not_called()
+            self.activate("Stop daemon")
+            await self.until(lambda: not self.ui.busy)
+        self.assertEqual(action.call_args.args[0].name, "other")
+        self.assertEqual(action.call_args.args[1], "stop")
+
+    async def test_card_focus_remains_visible_without_terminal_colors(self):
+        self.ui.app.exit()
+        await self.task
+        stream = io.StringIO()
+        output = Vt100_Output(stream, lambda: self.output.size, term="xterm",
+                              default_color_depth=ColorDepth.DEPTH_1_BIT, enable_cpr=False)
+        self.ui = BridgeUI(self.registry, input=self.pipe, output=output)
+        self.task = asyncio.create_task(self.ui.app.run_async())
+        await asyncio.sleep(.05)
+        self.assertRegex(stream.getvalue(), r"\x1b\[[0-9;]*7m[^\x1b]*Use backend")
+        stream.seek(0)
+        stream.truncate()
+        self.pipe.send_text("\t")
+        await self.until(lambda: self.ui.app.layout.has_focus(self.ui.buttons["Manage backends"]))
+        await asyncio.sleep(.05)
+        self.assertRegex(stream.getvalue(), r"\x1b\[[0-9;]*7m[^\x1b]*Manage backends")
 
     async def test_create_daemon_configuration_and_switch_registry_from_tui(self):
         self.ui.more_tools()
@@ -433,6 +510,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             check.assert_called_once_with(target, model="selected-model", effort=default)
 
     async def test_attachment_is_an_explicit_operation(self):
+        self.activate("Manage backends")
         self.activate("Attach existing")
         self.fill(name="demo", home=str(self.root / "home"))
         with patch(

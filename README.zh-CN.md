@@ -4,9 +4,9 @@
 
 管理独立 Codex daemon，发现供应商模型，并通过 MCP 跨供应商派发任务。使用键盘 TUI 完成配置和日常操作。
 
-![TUI 首页：供应商管理器及可选操作](docs/images/tui-manager.png)
+![字符 TUI 首页：使用后端和管理后端两张卡片](docs/images/tui-home.png)
 
-*运行 `codexd-bridge` 后的首页，图中使用尚未验证的演示后端。*
+*实际运行的首页，展示已配置的 Codex；选中的卡片会轻微放大并反色。*
 
 ## 使用前提
 
@@ -40,7 +40,7 @@ cd codexd-bridge
 codexd-bridge
 ```
 
-1. 在首页选择 **Set up this Codex**。
+1. 选择 **Manage backends → Set up this Codex**。
 2. 保留预填的 Codex 目录和名称，或选择需要接入的现有目录。
 3. 使用目录中已配置的供应商；标准 Codex 如果尚未显式设置供应商，选择 **OpenAI**。
 4. 选择 **Set up**。管理器会按需启动后台、验证模型访问、安装指南并注册 MCP 工具。
@@ -53,7 +53,7 @@ codexd-bridge
 
 ## 添加其他供应商
 
-先在终端导出供应商的密钥环境变量，再打开管理器并选择 **New provider**。服务须支持 Responses API。
+先在终端导出供应商的密钥环境变量，再打开管理器并选择 **Manage backends → New provider**。服务须支持 Responses API。
 
 | 表单字段 | 填写内容 |
 | --- | --- |
@@ -68,26 +68,35 @@ codexd-bridge
 
 ## 日常操作
 
-在首页选中目标后端，再选择对应操作。
+首页提供两张卡片：
+
+- **Use backend（使用后端）**：打开 Codex、浏览模型和管理会话。
+- **Manage backends（管理后端）**：添加配置、接入桥接工具、管理服务和卸载。
+
+顶部概览显示已配置的 Codex 及其桥接状态。操作需要目标时，如果只有一套配置则直接使用；有多套时再选择，按回车进入。
+**Daemon status** 用于检查对应 Codex 服务是否运行。关闭管理界面后，已启动的服务仍可继续运行。
+
+![实际运行的管理页面：配置、后台服务和工具分列显示](docs/images/tui-manager.png)
 
 | 要做什么 | TUI 入口 | 操作结果 |
 | --- | --- | --- |
-| 接入已有 Codex 目录 | **Attach existing** | 将现有目录加入管理器 |
-| 接入或刷新桥接工具 | **Connect bridge** | 验证模型访问，安装指南并注册 MCP |
-| 浏览或验证模型 | **Models** / **All models** | 查看单个后端或所有已配置后端 |
-| 管理任务 | **Sessions** | 创建、继续、派生或引导活动任务 |
-| 查看、启动或停止后台 | **Daemon status** / **Start daemon** / **Stop daemon** | 操作当前选中的后端 |
-| 安装 `codex-NAME` 命令 | **Install launcher** | 只安装命令，不启动后台或发送模型请求 |
-| 打开原生 Codex | **Open Codex** | 进入对应供应商界面，关闭后返回管理器 |
-| 查找其他操作 | **More tools** | daemon 配置创建、注册表切换、自定义模型验证、原生参数、诊断、MCP 详情和卸载 |
+| 接入已有 Codex 目录 | **Manage backends → Attach existing** | 将现有目录加入管理器 |
+| 接入或刷新桥接工具 | **Manage backends → Connect bridge** | 验证模型访问，安装指南并注册 MCP |
+| 浏览或验证模型 | **Use backend → Models** / **All models** | 查看单个后端或所有已配置后端 |
+| 管理任务 | **Use backend → Sessions** | 创建、继续、派生或引导活动任务 |
+| 查看、启动或停止后台 | **Manage backends → Daemon status** / **Start daemon** / **Stop daemon** | 操作当前选中的后端 |
+| 安装 `codex-NAME` 命令 | **Manage backends → Install launcher** | 只安装命令，不启动后台或发送模型请求 |
+| 打开原生 Codex | **Use backend → Open Codex** | 进入对应供应商界面，关闭后返回管理器 |
+| 查找其他操作 | **Manage backends → More tools** | daemon 配置创建、注册表切换、自定义模型验证、原生参数、诊断、MCP 详情和卸载 |
 
-**快捷键：** `Tab` / `Shift+Tab` 移动焦点 · `Enter` 选择 · `Ctrl+S` 提交 · `Esc` 返回 · `Ctrl+Q` 退出。
+**快捷键：** `Tab` / `Shift+Tab` 切换卡片或功能区，`↑` / `↓` 在区内选择。
+表单内用 `Tab` 切换字段；`Enter` 选择 · `Ctrl+S` 提交 · `Esc` 返回 · `Ctrl+Q` 退出。
 终端最小尺寸为 60 列、18 行。停止 daemon 需要确认；免逐次审批的任务派发须在 **Connect bridge** 中明确启用。
 
 ## 升级
 
 - 在新版下载目录运行 `./install.sh`。安装器会刷新属于本安装且已启用的 MCP 注册和未经修改的指南，无需重启 daemon；构建失败会保留原来的可用版本。
-- 如果指南有本地修改或刷新未完成，检查修改后选择 **Set up this Codex → Update to this version**。
+- 如果指南有本地修改或刷新未完成，检查修改后选择 **Manage backends → Set up this Codex → Update to this version**。
 - 通过其他包管理方式安装时，更新程序包后，在各后端选择 **Connect bridge → Update the installed bridge skill**。
 - 状态升级会保留已有任务的调用关系。旧版桥接程序无法读取升级后的状态；没有调用关系记录的旧任务需重新创建会话。
 
@@ -105,7 +114,7 @@ codexd-bridge
 | 移除 daemon 及其数据 | `codexd-bridge daemon remove NAME --purge` | 额外删除该 daemon 的数据 |
 | 卸载桥接项目 | `codexd-bridge uninstall` | 移除桥接程序及其集成；保留独立 daemon 和数据 |
 
-- **TUI 入口：** **Remove daemon** 或 **More tools → Uninstall bridge**。破坏性操作需要确认，删除数据还需输入后端名称。
+- **TUI 入口：** 进入 **Manage backends**，选择 **Remove daemon** 或 **More tools → Uninstall bridge**。破坏性操作需要确认，删除数据还需输入后端名称。
 - 停止或移除 daemon 会中断其活动任务。保留的数据可通过 **Attach existing** 重新接入；移除失败时保留禁用的注册记录，便于重试。
 - 数据删除会拒绝受保护或共享的 Codex 目录，以及包含桥接程序、注册表或其他后端的目录。
 - `./uninstall.sh` 也可卸载桥接项目。卸载会保留本地修改过的指南和其他程序的命令。
@@ -120,7 +129,7 @@ codexd-bridge
 | 使用其他注册表 | `codexd-bridge --config /absolute/bridge.toml ui` |
 | 启动 MCP stdio 入口 | `codexd-bridge serve` |
 
-诊断不会发送模型请求，结果以 JSON 输出；发现检查错误时退出码为 1。也可在 **More tools → Diagnostics** 中查看。
+诊断不会发送模型请求，结果以 JSON 输出；发现检查错误时退出码为 1。也可在 **Manage backends → More tools → Diagnostics** 中查看。
 
 [发行指南](docs/releasing.md)列出验证结果及未验证的平台和模型；[架构说明](docs/architecture.md)介绍会话与失败处理；[版本变更](CHANGELOG.md)汇总功能改进。
 

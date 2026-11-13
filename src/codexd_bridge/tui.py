@@ -45,9 +45,11 @@ STAGES = {
 STYLE = Style.from_dict(
     {
         "title": "bold",
-        "button.focused": "reverse bold",
+        "button.focused": "bg:#000000 #ffffff reverse bold",
         "radio-selected": "reverse",
         "error": "ansired",
+        "home-card": "bg:#000000 #ffffff",
+        "home-card.focused": "bg:#000000 #ffffff reverse",
     }
 )
 
@@ -78,6 +80,9 @@ class BridgeUI:
         self.connect_drafts = {}
         self.fields = {}
         self.buttons = {}
+        self.action_groups = []
+        self.group_focus = []
+        self.menu = self.home
         self.screen = ""
         self.title = ""
         self.notice = ""
@@ -98,6 +103,14 @@ class BridgeUI:
         @keys.add("s-tab")
         def previous_field(_event):
             self.move_focus(-1)
+
+        @keys.add("up", filter=Condition(lambda: bool(self.action_groups)))
+        def previous_action(_event):
+            self.move_action(-1)
+
+        @keys.add("down", filter=Condition(lambda: bool(self.action_groups)))
+        def next_action(_event):
+            self.move_action(1)
 
         @keys.add("c-s", filter=Condition(lambda: not self.busy and self.submit is not None))
         def submit_form(_event):
@@ -129,7 +142,13 @@ class BridgeUI:
                         + (
                             "Finishing the current operation..."
                             if self.close_when_done
-                            else "Ctrl+Q exit  Tab move  Enter choose  Ctrl+S submit  Esc back"
+                            else (
+                                "Tab switch  Enter open  Ctrl+Q exit"
+                                if self.screen == "home"
+                                else "Tab area  Up/Down select  Enter run  Esc back  Ctrl+Q exit"
+                                if self.action_groups
+                                else "Ctrl+Q exit  Tab move  Enter choose  Ctrl+S submit  Esc back"
+                            )
                         )
                     ),
                     style="class:footer",
@@ -166,15 +185,18 @@ class BridgeUI:
         else:
             self.app.exit()
 
-    def show(self, title, content, actions, *, focus=None, back=None, screen="view"):
+    def show(self, title, content, actions, *, focus=None, back=None, screen="view",
+             action_groups=()):
         self.title, self.screen, self.notice = title, screen, ""
         self.submit = None
-        self.back = back or self.home
+        self.back = back or self.menu
         self.buttons = {
             label: Button(label, handler=lambda fn=handler: self.invoke(fn), width=23)
             for label, handler in actions
         }
         buttons = list(self.buttons.values())
+        self.action_groups = []
+        self.group_focus = []
 
         def action_rows():
             count = max(1, min(3, (self.app.output.get_size().columns - 4) // 25))
@@ -185,18 +207,65 @@ class BridgeUI:
                 ]
             )
 
-        self.body = HSplit(
-            [
-                HSplit([content], height=Dimension(min=1, weight=1)),
-                Window(height=1),
-                DynamicContainer(action_rows),
-            ],
-            padding=0,
-        )
+        if action_groups:
+            groups = [[self.buttons[label] for label in labels] for _, labels in action_groups]
+            self.action_groups = groups
+            self.group_focus = [group[0] for group in self.action_groups]
+            if screen == "home":
+                frames = [self.home_card(groups[0][0], "Open Codex\nSessions and models"),
+                          self.home_card(groups[1][0], "Add/connect providers\nStart/stop services")]
+            else:
+                frames = [
+                    Frame(HSplit(group), title=title, height=len(group) + 2)
+                    for (title, _), group in zip(action_groups, groups)
+                ]
+
+            def grouped_rows():
+                count = max(1, min(3, (self.app.output.get_size().columns - 4) // 27))
+                return HSplit(
+                    [VSplit(frames[i:i + count], padding=2)
+                     for i in range(0, len(frames), count)],
+                    padding=1,
+                )
+
+            self.body = ScrollablePane(
+                HSplit([content, Window(height=1), DynamicContainer(grouped_rows), Window()]),
+                show_scrollbar=False,
+            )
+        else:
+            self.body = HSplit(
+                [
+                    HSplit([content], height=Dimension(min=1, weight=1)),
+                    Window(height=1),
+                    DynamicContainer(action_rows),
+                ],
+                padding=0,
+            )
         if focus is not None or buttons:
             self.app.layout.focus(focus if focus is not None else buttons[0])
         self.app.layout.update_parents_relations()
         self.app.invalidate()
+
+    def home_card(self, button, description):
+        def focused():
+            return self.app.layout.has_focus(button)
+
+        button.left_symbol = button.right_symbol = ""
+        button.width = 21
+        button.window.style = "class:title"
+        # Keep each card's slot fixed; expand its border by one character on
+        # every side when focused, without moving the neighbouring card.
+        frame = Frame(HSplit([
+            Window(height=lambda: 2 if focused() else 1), button,
+            Label(description), Window(height=lambda: 2 if focused() else 1),
+        ]), height=lambda: 9 if focused() else 7)
+        return HSplit([
+            Window(height=lambda: 0 if focused() else 1),
+            VSplit([Window(width=lambda: 0 if focused() else 1), frame,
+                    Window(width=lambda: 0 if focused() else 1)]),
+            Window(height=lambda: 0 if focused() else 1),
+        ], height=9,
+            style=lambda: "class:home-card.focused" if focused() else "class:home-card")
 
     def invoke(self, action):
         """Keep recoverable local errors inside the manager, including stale registry entries."""
@@ -208,7 +277,7 @@ class BridgeUI:
     def text(self, title, text, actions=(), *, back=None, screen="view"):
         area = TextArea(text=clean(text), read_only=True, scrollbar=True)
         self.show(
-            title, area, list(actions) + [("Back", back or self.home)], back=back, screen=screen
+            title, area, list(actions) + [("Back", back or self.menu)], back=back, screen=screen
         )
 
     def form(self, title, fields, submit, *, values=None, back=None, label="Continue", intro=""):
@@ -256,7 +325,7 @@ class BridgeUI:
         self.show(
             title,
             ScrollablePane(HSplit(widgets)),
-            [(label, accept), ("Back", back or self.home)],
+            [(label, accept), ("Back", back or self.menu)],
             focus=next(iter(self.fields.values())),
             back=back,
             screen="form",
@@ -271,12 +340,26 @@ class BridgeUI:
         # Include fields below the viewport, even before the next screen redraw.
         # ScrollablePane brings the newly focused field into view.
         layout = self.app.layout
+        if self.action_groups:
+            for index, group in enumerate(self.action_groups):
+                for widget in group:
+                    if layout.has_focus(widget):
+                        self.group_focus[index] = widget
+                        layout.focus(self.group_focus[(index + step) % len(self.action_groups)])
+                        return
         windows = list(layout.get_focusable_windows())
         if windows:
             current = (
                 windows.index(layout.current_window) if layout.current_window in windows else -1
             )
             layout.focus(windows[(current + step) % len(windows)])
+
+    def move_action(self, step):
+        for group in self.action_groups:
+            for index, widget in enumerate(group):
+                if self.app.layout.has_focus(widget):
+                    self.app.layout.focus(group[(index + step) % len(group)])
+                    return
 
     def choose(self, title, choices, actions, *, back=None, description=""):
         if not choices:
@@ -287,7 +370,7 @@ class BridgeUI:
             [Label(description, style="class:subtitle"), Window(height=1), Frame(listing)]
         )
         wrapped = [(label, lambda fn=fn: fn(listing.current_value)) for label, fn in actions]
-        self.show(title, content, wrapped + [("Back", back or self.home)], focus=listing, back=back)
+        self.show(title, content, wrapped + [("Back", back or self.menu)], focus=listing, back=back)
 
     def work(self, title, function, success, *, retry=None, failure=None, back=None):
         """Keep the renderer responsive while bounded native operations run in a worker."""
@@ -350,7 +433,7 @@ class BridgeUI:
         ]
         return "\n".join(lines)
 
-    def home(self):
+    def load_routes(self):
         try:
             self.routes = load_backends(self.registry) if os.path.lexists(self.registry) else {}
         except (ValueError, OSError) as error:
@@ -361,67 +444,122 @@ class BridgeUI:
                 back=self.quit,
                 screen="error",
             )
-            return
+            return False
         names = list(self.routes)
         if self.selected not in self.routes:
             self.selected = names[0] if names else None
-        choices = [
-            (
-                name,
-                f"{name}  /  {b.model_provider}  /  "
-                + ("enabled" if b.enabled else "needs verification"),
-            )
-            for name, b in self.routes.items()
-        ]
-        listing = (
-            RadioList(choices, default=self.selected, select_on_focus=True) if choices else None
-        )
+        return True
+
+    def overview(self):
+        return DynamicContainer(self.overview_content)
+
+    def overview_content(self):
+        if self.app.output.get_size().rows < 24:
+            summary = (f"{len(self.routes)} Codex configured / "
+                       f"{sum(b.enabled for b in self.routes.values())} bridge enabled"
+                       if self.routes else "No Codex added. Choose Manage backends.")
+            return Frame(Label(summary), title="Your Codex", height=3)
+        if not self.routes:
+            return Frame(Label("No Codex added yet.\nChoose Manage backends to get started."),
+                         title="Your Codex", height=4)
+        lines = ["Name / Provider / Bridge"]
+        lines += [clean(f"{b.name} / {b.model_provider} / "
+                        + ("enabled" if b.enabled else "needs verification"))
+                  for b in list(self.routes.values())[:5]]
+        if len(self.routes) > 5:
+            lines.append(f"+ {len(self.routes) - 5} more; choose an action to see all.")
+        lines.append("Daemon status checks running services.")
+        return Frame(Label("\n".join(lines)), title="Your Codex", height=len(lines) + 2)
+
+    def home(self):
+        self.menu = self.home
+        if not self.load_routes():
+            return
+        self.show("Codex manager", self.overview(), [
+            ("Use backend", self.use_backend), ("Manage backends", self.manage_backends),
+        ], back=self.quit, screen="home", action_groups=[
+            ("Sessions & models", ["Use backend"]),
+            ("Setup & services", ["Manage backends"]),
+        ])
+
+    def choose_backend(self, action, *, back=None):
+        if not self.load_routes():
+            return
+        if not self.routes:
+            self.text("No Codex added", "Add a Codex configuration before using a backend.",
+                      [("Manage backends", self.manage_backends)], back=self.home)
+            return
+        if len(self.routes) == 1:
+            self.selected = next(iter(self.routes))
+            action()
+            return
+        listing = RadioList([(name, clean(f"{name} / {b.model_provider}"))
+                             for name, b in self.routes.items()],
+                            default=self.selected, select_on_focus=True)
+
+        def accept():
+            listing._handle_enter()
+            self.selected = listing.current_value
+            action()
+
+        @listing.control.key_bindings.add("enter")
+        def enter(_event):
+            self.invoke(accept)
+
+        self.show("Choose Codex", Frame(listing, title="Name / Provider"),
+                  [("Continue", accept), ("Back", back or self.menu)],
+                  focus=listing, back=back, screen="backend-picker")
+
+    def use_backend(self):
+        self.choose_backend(self.backend_menu, back=self.home)
+
+    def backend_menu(self):
+        target = self.bridge.backend(self.selected)
+        self.menu = self.backend_menu
+        navigation = ([("Switch backend", self.use_backend)] if len(self.routes) > 1 else [])
+        navigation += [("Home", self.home)]
+        self.show("Use / " + target.name,
+                  Label(clean(f"Codex: {target.name}\nProvider: {target.model_provider}")), [
+                      ("Open Codex", self.open_codex), ("Sessions", self.sessions),
+                      ("Models", self.models), ("All models", self.all_models),
+                  ] + navigation, back=self.home, screen="use", action_groups=[
+                      ("Work", ["Open Codex", "Sessions", "Models", "All models"]),
+                      ("Navigate", [label for label, _ in navigation]),
+                  ])
+
+    def manage_backends(self):
+        self.menu = self.manage_backends
+        if not self.load_routes():
+            return
 
         def selected(fn):
-            def invoke():
-                if listing:
-                    self.selected = listing.current_value
-                    fn()
-                else:
-                    self.notice = "Create a provider or attach an existing Codex home first."
+            return lambda: self.choose_backend(fn)
 
-            return invoke
-
-        actions = [
+        setup = [
             ("Set up this Codex", self.setup_codex),
             ("New provider", self.new_provider),
             ("Attach existing", self.attach),
-            ("All models", self.all_models),
         ]
-        if listing:
-            actions += [
+        management = []
+        if self.routes:
+            setup += [
+                ("Connect bridge", selected(self.connect)),
+                ("Install launcher", selected(self.install_launcher)),
+            ]
+            management += [
                 ("Daemon status", selected(lambda: self.daemon("status"))),
                 ("Start daemon", selected(lambda: self.daemon("start"))),
                 ("Stop daemon", selected(self.confirm_stop)),
                 ("Remove daemon", selected(self.remove_daemon)),
-                ("Connect bridge", selected(self.connect)),
-                ("Install launcher", selected(self.install_launcher)),
-                ("Models", selected(self.models)),
-                ("Sessions", selected(self.sessions)),
-                ("Open Codex", selected(self.open_codex)),
             ]
-        actions += [("More tools", selected(self.more_tools) if listing else self.more_tools),
-                    ("Refresh", self.home), ("Quit", self.quit)]
-        content = HSplit(
-            [
-                Label(
-                    "Choose a provider to manage its daemon, models and sessions.",
-                    style="class:subtitle",
-                ),
-                Window(height=1),
-                Frame(listing)
-                if listing
-                else Label("Welcome! Choose Set up this Codex to use your existing account.\n"
-                           "Choose New provider to connect another model service."),
-            ]
-        )
+        tools = [("More tools", self.more_tools), ("Refresh", self.manage_backends),
+                 ("Home", self.home), ("Quit", self.quit)]
+        groups = [("Setup", setup), ("Daemon", management), ("Tools", tools)]
+        groups = [(title, actions) for title, actions in groups if actions]
         self.show(
-            "Provider manager", content, actions, focus=listing, back=self.quit, screen="home"
+            "Manage backends", self.overview(), setup + management + tools,
+            back=self.home, screen="manager",
+            action_groups=[(title, [label for label, _ in actions]) for title, actions in groups],
         )
 
     def setup_codex(self):
@@ -461,7 +599,7 @@ class BridgeUI:
                           "New Codex sessions using this directory will discover the bridge automatically.\n"
                           "Existing sessions may need to reconnect to refresh their tools.\n\n"
                           + str(directory),
-                          [("Open Codex", self.open_codex), ("Provider manager", self.home)],
+                          [("Open Codex", self.open_codex), ("Manage backends", self.manage_backends)],
                           screen="success")
 
             def failed(error):
@@ -773,7 +911,7 @@ class BridgeUI:
                            "Use Attach existing to connect it again.")
                 if result["kept_files"]:
                     details += "\n\nKept modified or unrelated files:\n" + "\n".join(result["kept_files"])
-                self.text("Daemon removed", details, [("Provider manager", self.home)], screen="success")
+                self.text("Daemon removed", details, [("Manage backends", self.manage_backends)], screen="success")
 
             self.work("Removing " + target.name,
                       lambda progress: remove_daemon(target.name, registry_path=self.registry,
@@ -795,8 +933,11 @@ class BridgeUI:
         actions = [("Create daemon", self.create_daemon), ("Choose registry", self.choose_registry),
                    ("Diagnostics", self.diagnostics), ("MCP connection", self.mcp_connection),
                    ("Uninstall bridge", self.confirm_uninstall)]
-        if self.selected:
-            actions += [("Verify model ID", self.verify_model_id), ("Codex arguments", self.codex_arguments)]
+        if self.routes:
+            actions += [("Verify model ID", lambda: self.choose_backend(self.verify_model_id,
+                                                                      back=self.more_tools)),
+                        ("Codex arguments", lambda: self.choose_backend(self.codex_arguments,
+                                                                       back=self.more_tools))]
         self.text("More tools", "Additional setup, native Codex and application management.\n\n"
                   + "Current registry: " + str(self.registry), actions)
 
