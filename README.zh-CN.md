@@ -1,6 +1,6 @@
 # Codex Daemon Bridge
 
-[English](README.md) | 简体中文
+[![English](https://img.shields.io/badge/English-555555?style=flat-square)](README.md) [![简体中文（当前）](https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-8C2F39?style=flat-square)](README.zh-CN.md)
 
 通过 MCP 协调不同模型供应商的独立 Codex App Server 会话，发现可用模型、派发任务，并继续与其他供应商的会话沟通。
 
