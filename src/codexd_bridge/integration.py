@@ -12,10 +12,10 @@ is ever echoed. No daemon is started or restarted.
 from __future__ import annotations
 
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
+from . import __version__
 from .transport import AppServer, BridgeError
 
 __all__ = ["IntegrationError", "install_skill", "register_bridge"]
@@ -26,20 +26,28 @@ SERVER_KEY_PATH = "mcp_servers.codexd-bridge"
 SESSION_WRITE_TOOLS = ("create_session", "send_message", "fork_session", "steer_session")
 
 
+def _field_edits(existing: dict, managed: dict, prefix: str = SERVER_KEY_PATH) -> list[dict]:
+    """Update only owned leaves, preserving unrelated and concurrently edited fields."""
+    edits = []
+    for key, value in managed.items():
+        path = f"{prefix}.{key}"
+        if isinstance(value, dict):
+            current = existing.get(key, {})
+            if not isinstance(current, dict):
+                raise IntegrationError(f"configuration {path} is not a table")
+            edits.extend(_field_edits(current, value, path))
+        elif existing.get(key) != value:
+            edits.append({"keyPath": path, "value": value, "mergeStrategy": "replace"})
+    return edits
+
+
 class IntegrationError(BridgeError):
     """Installation or registration was refused; nothing was silently overwritten."""
 
 
 def _default_source() -> Path:
-    """Prefer the packaged data-files copy, then the repository checkout.
-
-    Wheels install the canonical skill under ``share/codexd-bridge/skills`` via
-    setuptools data-files; editable checkouts keep it at the repository root.
-    """
-    packaged = Path(sys.prefix) / "share" / "codexd-bridge" / "skills" / SKILL_NAME
-    if (packaged / "SKILL.md").is_file():
-        return packaged
-    return Path(__file__).resolve().parents[2] / "skills" / SKILL_NAME
+    """Keep resources beside the package for venv, user and editable installs."""
+    return Path(__file__).resolve().with_name("skill")
 
 
 def _manifest(root: Path) -> dict:
@@ -58,15 +66,15 @@ def _manifest(root: Path) -> dict:
     return entries
 
 
-def install_skill(home: Path, *, source: Path | None = None) -> Path:
+def install_skill(home: Path, *, source: Path | None = None, update: bool = False) -> Path:
     """Copy the bundled skill into ``home/skills/codexd-bridge`` and return that path.
 
     ``source`` is a skill directory containing ``SKILL.md``; when omitted, the
-    packaged copy under ``sys.prefix`` is preferred and the repository checkout
-    is the fallback. Only the bridge's own skill directory is written. An
-    identical existing installation is returned unchanged (idempotent); any
-    differing content, extra entries, symlinks, or non-directory occupants are
-    refused without modification. Other skills are never listed or touched.
+    package's own resource directory is used. Only the bridge's skill directory
+    is written. An identical installation is returned unchanged; any
+    differing installation is preserved unless ``update`` is explicitly true.
+    Updates stage the full new tree and restore the old tree if replacement
+    fails. Symlinks and non-directory occupants are always refused.
     """
     home = Path(home).expanduser()
     if not home.is_absolute():
@@ -83,36 +91,40 @@ def install_skill(home: Path, *, source: Path | None = None) -> Path:
     if target.exists():
         if _manifest(src) == _manifest(target):
             return target
-        raise IntegrationError(f"refusing to overwrite differing skill content: {target}")
+        if not update:
+            raise IntegrationError(
+                f"refusing to overwrite differing skill content: {target}; "
+                "review local changes, then use connect --update-skill to replace it"
+            )
+        if any(p.is_symlink() for p in target.rglob("*")):
+            raise IntegrationError("refusing to update a skill containing symlinks")
     skills_dir.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{SKILL_NAME}-install-", dir=skills_dir))
+    backup = None
     try:
         shutil.copytree(src, staging, dirs_exist_ok=True)
-        staging.rename(target)
+        if target.exists():
+            if not update:
+                raise IntegrationError(
+                    "skill appeared during installation; inspect it before retrying"
+                )
+            backup = Path(tempfile.mkdtemp(prefix=f".{SKILL_NAME}-previous-", dir=skills_dir))
+            target.rename(backup / "skill")
+        try:
+            staging.rename(target)
+        except BaseException:
+            if backup is not None:
+                (backup / "skill").rename(target)
+            raise
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    finally:
+        if backup is not None and not (backup / "skill").exists():
+            backup.rmdir()
+    if backup is not None and backup.exists():
+        shutil.rmtree(backup)
     return target
-
-
-def _approve_session_writes(entry: dict) -> dict:
-    """Set approval_mode=approve for the four session-mutating tools only.
-
-    Every other field of those tools, all other tool entries, and service-level
-    policies such as default_tools_approval_mode are preserved verbatim.
-    """
-    tools = entry.get("tools")
-    if tools is None:
-        tools = {}
-    if not isinstance(tools, dict):
-        raise IntegrationError("existing tools configuration is not a table; refusing to edit it")
-    updated = dict(tools)
-    for name in SESSION_WRITE_TOOLS:
-        tool = updated.get(name, {})
-        if not isinstance(tool, dict):
-            raise IntegrationError(f"tool entry {name!r} is not a table; refusing to edit it")
-        updated[name] = {**tool, "approval_mode": "approve"}
-    return {**entry, "tools": updated}
 
 
 def register_bridge(
@@ -127,16 +139,15 @@ def register_bridge(
 
     The daemon at ``home`` must already be running; it is contacted through
     ``client_factory`` (``AppServer`` by default). Only the owned service entry
-    is written, via ``config/value/write`` at keyPath ``mcp_servers.codexd-bridge``
-    with mergeStrategy ``replace``: command/args/enabled/startup_timeout_sec/
-    tool_timeout_sec are managed here, every other existing field of that entry is
-    preserved, and no other MCP server is touched. Approval policies are never
-    changed unless ``allow_session_writes`` is explicitly true, which sets
+    is updated, via ``config/batchWrite`` of its managed leaf fields:
+    command/args/enabled/timeouts and its version marker in env. Other fields
+    are preserved, including concurrent changes by another client. Approval
+    policies change only when ``allow_session_writes`` is explicitly true, which sets
     ``approval_mode="approve"`` for create_session/send_message/fork_session/
     steer_session only. ``config/mcpServer/reload`` then refreshes MCP
     connections; the daemon itself is not started or restarted. An identical
-    entry skips the write. ``effective`` is false with a warning when a
-    higher-priority layer overrides the written value. The returned summary
+    entry skips the write. ``effective`` is false when a policy overrides the
+    update or the new MCP worker cannot expose its tools. The returned summary
     contains no configuration values or credentials.
     """
     home = Path(home).expanduser()
@@ -155,6 +166,8 @@ def register_bridge(
         "enabled": True,
         "startup_timeout_sec": 20,
         "tool_timeout_sec": 60,
+        # A changed server identity lets the daemon replace old MCP workers on upgrade.
+        "env": {"CODEXD_BRIDGE_VERSION": __version__},
     }
     with client_factory(home) as client:
         read = client.call("config/read", {"includeLayers": False})
@@ -171,25 +184,33 @@ def register_bridge(
             raise IntegrationError(
                 "existing codexd-bridge entry is URL-based; refusing to convert its transport"
             )
-        merged = {**existing, **managed}
         if allow_session_writes:
-            merged = _approve_session_writes(merged)
-        changed = merged != existing
+            managed["tools"] = {name: {"approval_mode": "approve"} for name in SESSION_WRITE_TOOLS}
+        edits = _field_edits(existing, managed)
+        changed = bool(edits)
         write_status = None
         version = None
         if changed:
             written = client.call(
-                "config/value/write",
-                {"keyPath": SERVER_KEY_PATH, "value": merged, "mergeStrategy": "replace"},
+                "config/batchWrite",
+                {"edits": edits, "reloadUserConfig": True},
             )
             write_status = written.get("status")
             version = written.get("version")
             if write_status not in ("ok", "okOverridden"):
                 raise IntegrationError(
-                    "config/value/write returned an unexpected status; "
+                    "config/batchWrite returned an unexpected status; "
                     "inspect the daemon configuration before retrying"
                 )
         client.call("config/mcpServer/reload", None)
+        inventory = client.call("mcpServerStatus/list", {"serverName": SERVER_NAME, "limit": 1})
+        ready = any(
+            entry.get("name") == SERVER_NAME
+            and not entry.get("toolsError")
+            and bool(entry.get("tools"))
+            and (entry.get("serverInfo") or {}).get("version") == __version__
+            for entry in inventory.get("data", [])
+        )
     overridden = write_status == "okOverridden"
     return {
         "server": SERVER_NAME,
@@ -197,13 +218,14 @@ def register_bridge(
         "changed": changed,
         "write_status": write_status,
         "version": version,
-        "effective": not overridden,
+        "effective": not overridden and ready,
+        "tools_ready": ready,
         "warning": (
             "a higher-priority configuration layer overrides mcp_servers.codexd-bridge; "
             "the registered value is not in effect"
         )
         if overridden
-        else None,
+        else (None if ready else "MCP tool discovery did not confirm the installed bridge version"),
         "reloaded": True,
-        "allow_session_writes": bool(allow_session_writes),
+        "session_write_approval_requested": bool(allow_session_writes),
     }

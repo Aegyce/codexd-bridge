@@ -32,6 +32,12 @@ class MCPIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     data = json.loads(result.content[0].text)
                     self.assertEqual(data["backends"][0]["model_provider"], "demo")
                     self.assertFalse(data["backends"][0]["socket_exists"])
+                    failed = await session.call_tool("list_models", {"backend": "demo"})
+                    self.assertTrue(failed.is_error)
+                    self.assertIn("Cannot connect to App Server", failed.content[0].text)
+                    unknown = await session.call_tool("list_models", {"backend": "missing"})
+                    self.assertTrue(unknown.is_error)
+                    self.assertIn("Unknown backend", unknown.content[0].text)
 
 
 if __name__ == "__main__":

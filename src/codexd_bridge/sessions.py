@@ -158,9 +158,8 @@ class Bridge:
                     "default_model": b.default_model,
                     "default_effort": b.default_effort,
                     "enabled": b.enabled,
-                    "socket_exists": (
-                        b.home / "app-server-control/app-server-control.sock"
-                    ).exists(),
+                    "home_exists": b.home.is_dir(),
+                    "socket_exists": b.socket_path.exists(),
                 }
                 for b in load_backends(self.config_path).values()
             ]
@@ -281,6 +280,19 @@ class Bridge:
                     "cursor": cursor,
                 },
             )
+            # A persisted summary may call a running turn "interrupted" before
+            # its completion is flushed. Resolve that ambiguity from live state.
+            live_turns = {}
+            if thread.get("status", {}).get("type") == "active" and any(
+                turn.get("status") == "interrupted" for turn in page["data"]
+            ):
+                live = require_provider(
+                    target,
+                    client.call("thread/read", {"threadId": thread_id, "includeTurns": True})[
+                        "thread"
+                    ],
+                )
+                live_turns = {turn["id"]: turn for turn in live.get("turns", [])}
             turns = []
             budget = text_limit
             for turn in page["data"]:
@@ -303,11 +315,12 @@ class Bridge:
                         messages, budget = text_messages(
                             list(reversed(turn.get("items", []))), budget
                         )
-                error = turn.get("error")
+                current = live_turns.get(turn["id"], turn)
+                error = current.get("error")
                 turns.append(
                     {
                         "id": turn["id"],
-                        "status": turn["status"],
+                        "status": current["status"],
                         "error": str(error.get("message", ""))[:1000]
                         if isinstance(error, dict)
                         else None,

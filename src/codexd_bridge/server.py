@@ -1,19 +1,35 @@
 """Expose session operations as local MCP tools."""
 
-import argparse
+from functools import wraps
 from pathlib import Path
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from . import __version__
 from .sessions import Bridge
+from .transport import BridgeError
+
+
+def public_errors(function):
+    """Expose expected operational errors; the SDK still hides unexpected crashes."""
+
+    @wraps(function)
+    def invoke(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (BridgeError, ValueError) as error:
+            raise ToolError(str(error)) from error
+
+    return invoke
 
 
 def create_server(config_path: Path | None = None) -> MCPServer:
     bridge = Bridge(config_path)
     server = MCPServer(
         "codexd-bridge",
-        version="0.1.0",
+        version=__version__,
         instructions=(
             "Coordinate independent Codex App Servers through explicitly configured backends. "
             "Choose the intended backend using list_backends; never silently fall back to another provider. "
@@ -53,15 +69,15 @@ def create_server(config_path: Path | None = None) -> MCPServer:
                 idempotentHint=read_only,
                 openWorldHint=not read_only,
             ),
-        )(method)
+        )(public_errors(method))
     return server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, help="Bridge TOML configuration file")
-    args = parser.parse_args()
-    create_server(args.config).run(transport="stdio")
+    # Retain the original module entry point with one CLI implementation.
+    from .cli import main as cli_main
+
+    cli_main()
 
 
 if __name__ == "__main__":

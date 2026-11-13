@@ -175,15 +175,21 @@ class HomeValidationTests(ConfigTestCase):
             self.config_for("qwen", "relative/dir"), "qwen", "'home'", "absolute"
         )
 
-    def test_nonexistent_home_rejected(self):
-        self.assert_config_error(
-            self.config_for("qwen", self.root / "no-such-dir"), "qwen", "'home'", "directory"
+    def test_unavailable_home_does_not_block_valid_routes(self):
+        available = self.make_home("healthy")
+        missing = self.root / "no-such-dir"
+        path = self.write_config(
+            self.config_for("qwen", missing) + self.config_for("healthy", available)
         )
+        loaded = load_backends(path)
+        self.assertEqual(loaded["qwen"].home, missing)
+        self.assertEqual(loaded["healthy"].home, available)
 
-    def test_home_pointing_at_file_rejected(self):
+    def test_home_availability_is_checked_by_target_connection(self):
         file_path = self.root / "not-a-dir"
         file_path.write_text("x", encoding="utf-8")
-        self.assert_config_error(self.config_for("qwen", file_path), "qwen", "'home'")
+        path = self.write_config(self.config_for("qwen", file_path))
+        self.assertEqual(load_backends(path)["qwen"].home, file_path)
 
     def test_unknown_user_home_rejected(self):
         message = self.assert_config_error(

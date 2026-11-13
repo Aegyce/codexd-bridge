@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools==84.2.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "codexd-bridge"
-version = "0.1.0"
+dynamic = ["version"]
 description = "MCP access to independent Codex App Servers with explicit provider binding"
 requires-python = ">=3.11"
 license = "CC-BY-NC-4.0"
@@ -18,8 +18,11 @@ codexd-bridge = "codexd_bridge.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.data-files]
-"share/codexd-bridge/skills/codexd-bridge" = ["skills/codexd-bridge/SKILL.md"]
+[tool.setuptools.package-data]
+codexd_bridge = ["skill/SKILL.md"]
+
+[tool.setuptools.dynamic]
+version = {attr = "codexd_bridge.__version__"}
 
 [tool.ruff]
 line-length = 100

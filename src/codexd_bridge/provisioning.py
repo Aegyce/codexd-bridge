@@ -145,14 +145,18 @@ def _atomic_write(path: Path, text: str, *, mode: int = 0o600) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), mode)
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            os.fchmod(fd, mode)
+            _write_all(fd, text.encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
+    except BaseException:
+        # Cleanup cannot turn a committed registration into a failed one.
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -448,10 +452,8 @@ def create_daemon(
     are refused without echoing values. auth.json and environment variable
     values are never read.
 
-    Limitations: an existing registry is validated strictly via load_backends,
-    so a stale entry (e.g. a deleted home) blocks new registrations until it is
-    fixed. On registration failure the freshly created home is rolled back
-    best-effort.
+    Existing route syntax is validated without requiring those daemons to be
+    available. On registration failure the newly created home is rolled back.
     """
     if not isinstance(name, str) or not _BACKEND_NAME_RE.fullmatch(name):
         raise ProvisioningError(

@@ -9,17 +9,12 @@ import shutil
 import sys
 from pathlib import Path
 
-from .config import CONFIG_ENV_VAR, DEFAULT_CONFIG_PATH, ConfigError, load_backends
+from .config import ConfigError, _resolve_config_path, load_backends
 from .transport import BridgeError
 
 
 def registry_path(explicit: Path | None) -> Path:
-    path = (
-        explicit
-        if explicit is not None
-        else Path(os.environ.get(CONFIG_ENV_VAR) or DEFAULT_CONFIG_PATH)
-    )
-    return path.expanduser().resolve()
+    return _resolve_config_path(explicit)[0].absolute()
 
 
 def parser() -> argparse.ArgumentParser:
@@ -55,6 +50,11 @@ def parser() -> argparse.ArgumentParser:
     connect.add_argument("name")
     connect.add_argument(
         "--executable", type=Path, help="Absolute installed codexd-bridge executable"
+    )
+    connect.add_argument(
+        "--update-skill",
+        action="store_true",
+        help="Replace the installed bridge skill, including local edits, with the bundled version",
     )
     connect.add_argument(
         "--allow-session-writes",
@@ -148,12 +148,16 @@ def main(argv: list[str] | None = None) -> None:
                         if candidate.is_file()
                         else Path(shutil.which("codexd-bridge") or "")
                     )
-                if not executable.is_absolute() or not executable.is_file():
+                if (
+                    not executable.is_absolute()
+                    or not executable.is_file()
+                    or not os.access(executable, os.X_OK)
+                ):
                     raise ValueError(
-                        "Provide an existing absolute --executable for the MCP service"
+                        "Provide an existing executable file at an absolute --executable path"
                     )
                 verification = check_model(backend)
-                skill = install_skill(backend.home)
+                skill = install_skill(backend.home, update=args.update_skill)
                 try:
                     registration = register_bridge(
                         backend.home,
@@ -167,9 +171,19 @@ def main(argv: list[str] | None = None) -> None:
                     ) from error
                 if registration.get("effective") is False:
                     raise BridgeError(
-                        "MCP registration is overridden by policy; backend was not enabled"
+                        "MCP registration is not effective; enabling was skipped. "
+                        + str(
+                            registration.get("warning")
+                            or "Check tool discovery and configuration policy"
+                        )
                     )
-                set_backend_enabled(backend.name, True, registry_path=config)
+                try:
+                    set_backend_enabled(backend.name, True, registry_path=config)
+                except (ValueError, OSError) as error:
+                    raise BridgeError(
+                        f"Model verified; skill installed at {skill}; MCP registered. "
+                        f"Enabling backend {backend.name} failed: {error}"
+                    ) from error
                 output = {
                     "backend": backend.name,
                     "skill": str(skill),

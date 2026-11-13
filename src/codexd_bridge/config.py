@@ -1,8 +1,8 @@
 """Load the bridge's own TOML configuration using only the standard library.
 
-Only this bridge configuration file is read. Backend homes are validated as
-existing directories, but their configuration files and credentials are never
-opened. Control sockets are derived from ``home`` and cannot be configured.
+Only this bridge configuration file is read. Backend homes must be absolute;
+their availability is checked on connection so an offline route cannot block
+healthy routes. Control sockets are derived from ``home`` and cannot be configured.
 """
 
 from __future__ import annotations
@@ -106,8 +106,6 @@ def _home_field(backend: str, value: object) -> Path:
         raise ConfigError(
             f"backend {backend!r}: field 'home' must be an absolute path after '~' expansion"
         )
-    if not home.is_dir():
-        raise ConfigError(f"backend {backend!r}: field 'home' must be an existing directory")
     return home
 
 

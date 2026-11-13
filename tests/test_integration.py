@@ -1,12 +1,13 @@
 """Integration helpers are exercised with mock clients and temporary directories only."""
 
+import copy
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from codexd_bridge import integration
+from codexd_bridge import __version__
 from codexd_bridge.integration import IntegrationError, install_skill, register_bridge
 from codexd_bridge.transport import BridgeError
 
@@ -20,6 +21,7 @@ def managed_for(executable: Path, registry: Path) -> dict:
         "enabled": True,
         "startup_timeout_sec": 20,
         "tool_timeout_sec": 60,
+        "env": {"CODEXD_BRIDGE_VERSION": __version__},
     }
 
 
@@ -27,7 +29,9 @@ class FakeClient:
     """Records native config calls; never opens a socket or touches a daemon."""
 
     def __init__(self, config=None, *, write_status="ok", read_error=None, write_error=None):
-        self.config = {} if config is None else config
+        self.config = copy.deepcopy({} if config is None else config)
+        self.concurrent_change = None
+        self.tools_ready = True
         self.write_status = write_status
         self.read_error = read_error
         self.write_error = write_error
@@ -46,13 +50,32 @@ class FakeClient:
         if method == "config/read":
             if self.read_error is not None:
                 raise self.read_error
-            return {"config": self.config, "origins": {}}
-        if method == "config/value/write":
+            return {"config": copy.deepcopy(self.config), "origins": {}}
+        if method == "config/batchWrite":
             if self.write_error is not None:
                 raise self.write_error
+            if self.concurrent_change:
+                self.concurrent_change(self.config)
+            for edit in params["edits"]:
+                keys = edit["keyPath"].split(".")
+                target = self.config
+                for key in keys[:-1]:
+                    target = target.setdefault(key, {})
+                target[keys[-1]] = edit["value"]
             return {"filePath": "/daemon/config.toml", "status": self.write_status, "version": "7"}
         if method == "config/mcpServer/reload":
             return {}
+        if method == "mcpServerStatus/list":
+            return {
+                "data": [
+                    {
+                        "name": "codexd-bridge",
+                        "toolsError": None,
+                        "tools": {"list_backends": {}} if self.tools_ready else {},
+                        "serverInfo": {"version": __version__},
+                    }
+                ]
+            }
         raise AssertionError(f"unexpected method: {method}")
 
     def methods(self):
@@ -84,6 +107,13 @@ class RegisterTests(unittest.TestCase):
     def test_integration_error_is_catchable_as_bridge_error(self):
         self.assertTrue(issubclass(IntegrationError, BridgeError))
 
+    def test_failed_tool_discovery_is_not_a_successful_registration(self):
+        client = FakeClient()
+        client.tools_ready = False
+        result, _, _ = self.register(client=client)
+        self.assertFalse(result["effective"])
+        self.assertFalse(result["tools_ready"])
+
     def test_fresh_registration_writes_only_the_owned_entry(self):
         config = {
             "mcp_servers": {"other": {"command": "/bin/other"}},
@@ -91,17 +121,32 @@ class RegisterTests(unittest.TestCase):
         }
         result, client, factory = self.register(config)
         self.assertEqual(
-            client.methods(), ["config/read", "config/value/write", "config/mcpServer/reload"]
+            client.methods(),
+            ["config/read", "config/batchWrite", "config/mcpServer/reload", "mcpServerStatus/list"],
         )
         self.assertEqual(client.params_for("config/read"), [{"includeLayers": False}])
-        writes = client.params_for("config/value/write")
+        writes = client.params_for("config/batchWrite")
         self.assertEqual(len(writes), 1)
         self.assertEqual(
             writes[0],
             {
-                "keyPath": "mcp_servers.codexd-bridge",
-                "value": managed_for(self.executable, self.registry),
-                "mergeStrategy": "replace",
+                "edits": [
+                    {
+                        "keyPath": f"mcp_servers.codexd-bridge.{key}",
+                        "value": value,
+                        "mergeStrategy": "replace",
+                    }
+                    for key, value in managed_for(self.executable, self.registry).items()
+                    if key != "env"
+                ]
+                + [
+                    {
+                        "keyPath": "mcp_servers.codexd-bridge.env.CODEXD_BRIDGE_VERSION",
+                        "value": __version__,
+                        "mergeStrategy": "replace",
+                    }
+                ],
+                "reloadUserConfig": True,
             },
         )
         self.assertEqual(client.params_for("config/mcpServer/reload"), [None])
@@ -111,7 +156,7 @@ class RegisterTests(unittest.TestCase):
         self.assertTrue(result["effective"])
         self.assertIsNone(result["warning"])
         self.assertTrue(result["reloaded"])
-        self.assertFalse(result["allow_session_writes"])
+        self.assertFalse(result["session_write_approval_requested"])
         factory.assert_called_once_with(self.home)
         self.assertTrue(client.closed)
         self.assertNotIn("SECRET-SENTINEL", repr(result))
@@ -132,7 +177,7 @@ class RegisterTests(unittest.TestCase):
         }
         result, client, _ = self.register({"mcp_servers": {"codexd-bridge": existing}})
         expected = {**existing, **managed_for(self.executable, self.registry)}
-        self.assertEqual(client.params_for("config/value/write")[0]["value"], expected)
+        self.assertEqual(client.config["mcp_servers"]["codexd-bridge"], expected)
         self.assertTrue(result["changed"])
 
     def test_allow_session_writes_approves_only_the_four_tools(self):
@@ -150,7 +195,7 @@ class RegisterTests(unittest.TestCase):
         result, client, _ = self.register(
             {"mcp_servers": {"codexd-bridge": existing}}, allow_session_writes=True
         )
-        value = client.params_for("config/value/write")[0]["value"]
+        value = client.config["mcp_servers"]["codexd-bridge"]
         expected_tools = {
             "create_session": {"approval_mode": "approve", "enabled": True},
             "send_message": {"approval_mode": "approve"},
@@ -160,14 +205,35 @@ class RegisterTests(unittest.TestCase):
         }
         self.assertEqual(value["tools"], expected_tools)
         self.assertEqual(value["default_tools_approval_mode"], "prompt")
-        self.assertTrue(result["allow_session_writes"])
+        self.assertTrue(result["session_write_approval_requested"])
+
+    def test_concurrent_permission_changes_are_not_overwritten(self):
+        client = FakeClient(
+            {
+                "mcp_servers": {
+                    "codexd-bridge": {"tools": {"create_session": {"approval_mode": "prompt"}}}
+                }
+            }
+        )
+
+        def concurrent_change(config):
+            entry = config["mcp_servers"]["codexd-bridge"]
+            entry["tools"]["create_session"]["enabled"] = False
+            entry["env"] = {"TOKEN": "concurrent-secret"}
+
+        client.concurrent_change = concurrent_change
+        self.register(client=client)
+        entry = client.config["mcp_servers"]["codexd-bridge"]
+        self.assertFalse(entry["tools"]["create_session"]["enabled"])
+        self.assertEqual(entry["env"]["TOKEN"], "concurrent-secret")
+        self.assertNotIn("concurrent-secret", repr(client.calls))
 
     def test_allow_session_writes_creates_missing_tools_table(self):
         existing = managed_for(self.executable, self.registry)
         _, client, _ = self.register(
             {"mcp_servers": {"codexd-bridge": existing}}, allow_session_writes=True
         )
-        value = client.params_for("config/value/write")[0]["value"]
+        value = client.config["mcp_servers"]["codexd-bridge"]
         self.assertEqual(
             value["tools"],
             {name: {"approval_mode": "approve"} for name in SESSION_WRITE_TOOLS},
@@ -182,7 +248,9 @@ class RegisterTests(unittest.TestCase):
             {"mcp_servers": {"codexd-bridge": existing}}, allow_session_writes=True
         )
         self.assertFalse(result["changed"])
-        self.assertEqual(client.methods(), ["config/read", "config/mcpServer/reload"])
+        self.assertEqual(
+            client.methods(), ["config/read", "config/mcpServer/reload", "mcpServerStatus/list"]
+        )
 
     def test_identical_entry_skips_write_but_reloads(self):
         existing = managed_for(self.executable, self.registry)
@@ -191,7 +259,9 @@ class RegisterTests(unittest.TestCase):
         self.assertIsNone(result["write_status"])
         self.assertIsNone(result["version"])
         self.assertTrue(result["effective"])
-        self.assertEqual(client.methods(), ["config/read", "config/mcpServer/reload"])
+        self.assertEqual(
+            client.methods(), ["config/read", "config/mcpServer/reload", "mcpServerStatus/list"]
+        )
 
     def test_url_based_entry_is_refused(self):
         client = FakeClient(
@@ -208,10 +278,10 @@ class RegisterTests(unittest.TestCase):
         self.assertEqual(client.methods(), ["config/read"])
 
     def test_write_failure_skips_reload(self):
-        client = FakeClient(write_error=BridgeError("config/value/write: outcome unknown"))
+        client = FakeClient(write_error=BridgeError("config/batchWrite: outcome unknown"))
         with self.assertRaises(BridgeError):
             self.register(client=client)
-        self.assertEqual(client.methods(), ["config/read", "config/value/write"])
+        self.assertEqual(client.methods(), ["config/read", "config/batchWrite"])
 
     def test_unexpected_read_shapes_are_refused(self):
         for config in (None, {"mcp_servers": []}, {"mcp_servers": {"codexd-bridge": "table?"}}):
@@ -243,13 +313,13 @@ class RegisterTests(unittest.TestCase):
         self.assertIsInstance(result["warning"], str)
         self.assertIn("overrides", result["warning"])
         self.assertTrue(result["reloaded"])
-        self.assertEqual(client.methods()[-1], "config/mcpServer/reload")
+        self.assertEqual(client.methods()[-2], "config/mcpServer/reload")
 
     def test_unexpected_write_status_requires_inspection(self):
         client = FakeClient(write_status="mystery")
         with self.assertRaisesRegex(IntegrationError, "inspect"):
             self.register(client=client)
-        self.assertEqual(client.methods(), ["config/read", "config/value/write"])
+        self.assertEqual(client.methods(), ["config/read", "config/batchWrite"])
 
     def test_secrets_are_never_echoed_in_results_or_errors(self):
         config = {
@@ -258,9 +328,12 @@ class RegisterTests(unittest.TestCase):
         }
         result, client, _ = self.register(config)
         self.assertNotIn("SECRET-SENTINEL", repr(result))
-        written = client.params_for("config/value/write")[0]["value"]
-        self.assertEqual(written["env"], {"TOKEN": "SECRET-SENTINEL"})
-        failing = FakeClient(config, write_error=BridgeError("config/value/write: outcome unknown"))
+        written = client.params_for("config/batchWrite")[0]
+        self.assertNotIn("SECRET-SENTINEL", repr(written))
+        self.assertEqual(
+            client.config["mcp_servers"]["codexd-bridge"]["env"]["TOKEN"], "SECRET-SENTINEL"
+        )
+        failing = FakeClient(config, write_error=BridgeError("config/batchWrite: outcome unknown"))
         with self.assertRaises(BridgeError) as raised:
             self.register(client=failing)
         self.assertNotIn("SECRET-SENTINEL", str(raised.exception))
@@ -295,6 +368,29 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(
             sorted(p.name for p in (self.home / "skills").iterdir()), ["codexd-bridge"]
         )
+
+    def test_explicit_upgrade_replaces_only_the_bridge_skill(self):
+        target = install_skill(self.home, source=self.source)
+        (self.source / "SKILL.md").write_text("version 2\n")
+        install_skill(self.home, source=self.source, update=True)
+        self.assertEqual((target / "SKILL.md").read_text(), "version 2\n")
+        self.assertEqual([p.name for p in (self.home / "skills").iterdir()], ["codexd-bridge"])
+
+    def test_failed_upgrade_restores_previous_skill(self):
+        target = install_skill(self.home, source=self.source)
+        (self.source / "SKILL.md").write_text("version 2\n")
+        rename = Path.rename
+
+        def fail_install(path, destination):
+            if path.name.startswith(".codexd-bridge-install-"):
+                raise OSError("replacement failed")
+            return rename(path, destination)
+
+        with patch.object(Path, "rename", fail_install):
+            with self.assertRaisesRegex(OSError, "replacement failed"):
+                install_skill(self.home, source=self.source, update=True)
+        self.assertEqual((target / "SKILL.md").read_text(), "# test skill\n")
+        self.assertEqual([p.name for p in (self.home / "skills").iterdir()], ["codexd-bridge"])
 
     def test_differing_content_is_refused(self):
         target = install_skill(self.home, source=self.source)
@@ -350,25 +446,13 @@ class InstallTests(unittest.TestCase):
         with self.assertRaisesRegex(IntegrationError, "symlinks"):
             install_skill(self.home, source=self.source)
 
-    def test_default_source_prefers_packaged_share(self):
-        prefix = self.root / "prefix"
-        packaged = prefix / "share" / "codexd-bridge" / "skills" / "codexd-bridge"
-        packaged.mkdir(parents=True)
-        (packaged / "SKILL.md").write_text("packaged\n", encoding="utf-8")
-        with patch.object(sys, "prefix", str(prefix)):
-            target = install_skill(self.home)
-        self.assertEqual((target / "SKILL.md").read_text(), "packaged\n")
+    def test_bundled_skill_is_independent_of_interpreter_prefix(self):
+        from codexd_bridge.integration import _default_source
 
-    def test_default_source_falls_back_to_repository(self):
-        with patch.object(sys, "prefix", str(self.root / "empty-prefix")):
+        expected = _default_source() / "SKILL.md"
+        with patch.object(sys, "prefix", str(self.root / "unrelated-prefix")):
             target = install_skill(self.home)
-        repo_skill = (
-            Path(integration.__file__).resolve().parents[2]
-            / "skills"
-            / "codexd-bridge"
-            / "SKILL.md"
-        )
-        self.assertEqual((target / "SKILL.md").read_bytes(), repo_skill.read_bytes())
+        self.assertEqual((target / "SKILL.md").read_bytes(), expected.read_bytes())
 
     def test_relative_home_is_refused(self):
         with self.assertRaisesRegex(IntegrationError, "absolute"):

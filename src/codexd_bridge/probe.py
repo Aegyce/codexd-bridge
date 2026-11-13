@@ -278,11 +278,11 @@ def _cleanup(client: AppServer, thread_id: str, state: _TurnState) -> list[str]:
     if state.turn_id is not None and not state.done:
         try:
             client.call("turn/interrupt", {"threadId": thread_id, "turnId": state.turn_id})
-        except Exception as error:
+        except BaseException as error:
             interrupt_problem = f"turn/interrupt failed: {error}"
     try:
         client.call("thread/delete", {"threadId": thread_id})
-    except Exception as error:
+    except BaseException as error:
         problems = [f"thread/delete failed: {error}"]
         if interrupt_problem:
             problems.insert(0, interrupt_problem)

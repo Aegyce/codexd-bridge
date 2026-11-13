@@ -18,6 +18,7 @@ from unittest.mock import patch
 from codexd_bridge.config import Backend, ConfigError, load_backends
 from codexd_bridge.provisioning import (
     ProvisioningError,
+    _atomic_write,
     create_daemon,
     daemon_action,
     set_backend_enabled,
@@ -646,12 +647,41 @@ class RegistryTests(ProvisioningTestCase):
         self.assertFalse(self.home("qwen").exists())
         self.assertEqual(self.registry.read_bytes(), before)
 
-    def test_stale_home_blocks_registration(self):
+    def test_stale_home_does_not_block_registration(self):
         stale = self.root / "stale-home"
         self.registry.write_text(f'[backends.gpt]\nhome = "{stale}"\nmodel_provider = "openai"\n')
-        with self.assertRaises(ValueError):
+        self.create_qwen("qwen")
+        self.assertTrue(self.home("qwen").exists())
+        self.assertEqual(load_backends(self.registry)["gpt"].home, stale)
+
+    def test_committed_registry_cannot_trigger_home_rollback_during_cleanup(self):
+        unlink = Path.unlink
+
+        def fail_temporary_cleanup(path, *args, **kwargs):
+            if path.name.endswith(".tmp"):
+                raise OSError("cleanup failed after commit")
+            return unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", fail_temporary_cleanup):
             self.create_qwen("qwen")
-        self.assertFalse(self.home("qwen").exists())
+        self.assertTrue(self.home("qwen").is_dir())
+        self.assertIn("qwen", load_backends(self.registry))
+
+    def test_failed_write_closes_file_descriptor_and_preserves_registry(self):
+        self.registry.write_text("original")
+        descriptors = []
+
+        def fail_write(fd, data):
+            descriptors.append(fd)
+            raise OSError("write failed")
+
+        with patch("codexd_bridge.provisioning.os.write", side_effect=fail_write):
+            with self.assertRaisesRegex(OSError, "write failed"):
+                _atomic_write(self.registry, "new")
+        self.assertEqual(self.registry.read_text(), "original")
+        self.assertTrue(descriptors)
+        with self.assertRaises(OSError):
+            os.fstat(descriptors[0])
 
     def test_home_reuse_error_names_backend(self):
         target = self.home("gpt")

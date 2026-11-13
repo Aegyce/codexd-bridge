@@ -14,11 +14,11 @@ flowchart LR
 
 ## 安装<br><sub>Installation</sub>
 
-需要 Python 3.11+ 与支持 Unix socket 的系统；生命周期命令依赖已安装的 `codex` CLI。协议适配以 Codex 0.167.2 为基准。<br><sub>Requires Python 3.11+ and a system with Unix sockets; lifecycle commands use the installed `codex` CLI. The protocol integration targets Codex 0.167.2.</sub>
+需要 Python 3.11+、POSIX 文件锁与 Unix socket；当前验证环境为 Linux x86_64、Python 3.11 和 3.12；生命周期命令依赖已安装的 `codex` CLI。协议适配以 Codex 0.167.2 为基准。<br><sub>Requires Python 3.11+, POSIX file locking, and Unix sockets; validated on Linux x86_64 with Python 3.11 and 3.12; lifecycle commands use the installed `codex` CLI. The protocol integration targets Codex 0.167.2.</sub>
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.lock
+.venv/bin/pip install --require-hashes -r requirements.lock
 .venv/bin/pip install --no-deps .
 source .venv/bin/activate
 mkdir -p ~/.config/codexd-bridge
@@ -50,9 +50,9 @@ codexd-bridge daemon list
 
 ### 接入<br><sub>Connect</sub>
 
-`connect` 面向已运行的 daemon，按序执行：真实推理验证 → 安装发现技能 → 注册 MCP 服务 → 启用路由；验证失败则不安装、不注册、不启用。技能装入 `<home>/skills/codexd-bridge`，让该后台未来的 Codex 会话识别桥接工具与路由规则；内容一致时幂等，已有不同内容拒绝覆盖。注册只写 `mcp_servers.codexd-bridge` 单键（command、`["--config", <注册表>, "serve"]`、enabled、startup_timeout_sec=20、tool_timeout_sec=60），保留其他 MCP 服务及该服务其余字段；被上层策略覆盖时报告 `effective=false` 且不执行启用步骤，原有启用状态保持不变。<br><sub>`connect` targets a running daemon and proceeds in order: real-inference verification, discovery-skill installation, MCP registration, then route enabling; a failed verification installs, registers, and enables nothing. The skill is installed at `<home>/skills/codexd-bridge` so future Codex sessions on that backend recognize the bridge tools and routing rules; identical content is idempotent and differing content is refused. Registration writes only the `mcp_servers.codexd-bridge` key (command, `["--config", <registry>, "serve"]`, enabled, startup_timeout_sec=20, tool_timeout_sec=60), preserving other MCP servers and the service's remaining fields; a policy override reports `effective=false` and skips enabling, preserving its previous enabled state.</sub>
+`connect` 面向已运行的 daemon，按序执行：真实推理验证 → 安装发现技能 → 注册 MCP 服务 → 启用路由；验证失败则不安装、不注册、不启用。技能装入 `<home>/skills/codexd-bridge`，让该后台未来的 Codex 会话识别桥接工具与路由规则；内容一致时不重复写入。升级后若内容不同，默认保留已安装文件；核对本地修改后，可用 `connect demo --update-skill` 显式替换，替换失败会恢复旧版本。注册通过原生批量配置接口，仅更新桥接层管理的字段，保留其他服务、环境变量与审批设置；刷新后确认当前版本的 MCP 工具可用，才执行启用步骤。被上层策略覆盖时报告 `effective=false` 且不执行启用步骤，原有启用状态保持不变。<br><sub>`connect` targets a running daemon and proceeds in order: real-inference verification, discovery-skill installation, MCP registration, then route enabling; a failed verification installs, registers, and enables nothing. The skill is installed at `<home>/skills/codexd-bridge` so future Codex sessions on that backend recognize the bridge tools and routing rules; identical content is left unchanged. After an upgrade, differing installed files are preserved by default; review local edits and use `connect demo --update-skill` to replace them explicitly. A failed replacement restores the previous version. Registration uses the native batch configuration API to update only bridge-managed fields, preserving other services, environment variables, and approval settings. After reload, it confirms that the current bridge version exposes tools before enabling the route. A policy override reports `effective=false` and skips enabling, preserving its previous enabled state.</sub>
 
-`--allow-session-writes` 是用户显式选项：仅当传入时，才将 create_session、send_message、fork_session、steer_session 四项工具的 approval_mode 设为 approve，其余工具与默认策略不变。默认不修改任何审批策略；未获授权时调用方可能遇到审批提示，应走正常审批流程。`--executable` 缺省取当前 Python 旁或 PATH 中的已安装可执行文件。<br><sub>`--allow-session-writes` is an explicit user opt-in: only when passed does it set approval_mode=approve for the four tools create_session, send_message, fork_session, and steer_session, leaving all other tools and default policies unchanged. By default no approval policy is modified; without authorization, callers may hit approval prompts and should use the normal approval flow. `--executable` defaults to the installed executable next to the running Python or on PATH.</sub>
+`--allow-session-writes` 是用户显式选项：仅当传入时，才将 create_session、send_message、fork_session、steer_session 四项工具的 approval_mode 设为 approve，其余工具与默认策略不变。返回的 `session_write_approval_requested` 表示本次是否请求授权，不表示已保存的审批状态。默认保留现有审批策略；未获授权时调用方可能遇到审批提示，应走正常审批流程。`--executable` 缺省取当前 Python 旁或 PATH 中的已安装可执行文件。<br><sub>`--allow-session-writes` is an explicit user opt-in: only when passed does it set approval_mode=approve for the four tools create_session, send_message, fork_session, and steer_session, leaving all other tools and default policies unchanged. `session_write_approval_requested` records the current request, not the saved approval state. Existing policies are preserved by default; without authorization, callers may hit approval prompts and should use the normal approval flow. `--executable` defaults to the installed executable next to the running Python or on PATH.</sub>
 
 ```bash
 codexd-bridge connect demo
@@ -71,7 +71,7 @@ codexd-bridge models check demo --model my-model --effort high
 
 ## 注册表<br><sub>Registry</sub>
 
-路由字段为 home、model_provider、default_model、default_effort、enabled。手写条目省略 enabled 时按 true 解析；`daemon create` 注册为 false。会话写工具（create/send/fork/steer）要求路由已启用；读取与发现不受此限。注册表更新在锁内原子替换，其他路由的字段值保持不变。<br><sub>Route fields are home, model_provider, default_model, default_effort, and enabled. Hand-written entries omitting enabled parse as true; `daemon create` registers false. Session mutation tools (create/send/fork/steer) require an enabled route; reads and discovery do not. Registry updates are atomic under a lock and preserve the field values of every other route.</sub>
+路由字段为 home、model_provider、default_model、default_effort、enabled。手写条目省略 enabled 时按 true 解析；`daemon create` 注册为 false。会话写工具（create/send/fork/steer）要求路由已启用；读取与发现不受此限。后台目录失效按该后台不可用处理，不阻断其他路由。注册表更新在锁内原子替换，其他路由的字段值保持不变。<br><sub>Route fields are home, model_provider, default_model, default_effort, and enabled. Hand-written entries omitting enabled parse as true; `daemon create` registers false. Session mutation tools (create/send/fork/steer) require an enabled route; reads and discovery do not. An unavailable home affects only that backend and does not block other routes. Registry updates are atomic under a lock and preserve the field values of every other route.</sub>
 
 ```toml
 [backends.demo]
@@ -104,6 +104,15 @@ enabled = false
 - 活动 turn 使用带 `expected_turn_id` 的 `steer_session`。`send_message` 的空闲检查非原子：其他客户端在最后一刻启动 turn 时，输入可能按原生语义加入该 turn。<br><sub>Active turns require `steer_session` with `expected_turn_id`. The `send_message` idleness check is not atomic: if another client starts a turn at the final instant, input may join that turn under native semantics.</sub>
 - 新会话使用 read-only/workspace-write 沙箱与 never 审批策略；继续、派生保留原会话权限。网络与执行能力仍受目标沙箱约束。<br><sub>New sessions use a read-only/workspace-write sandbox with the never approval policy; continuation and forking preserve existing permissions. Network and execution access remain subject to the target sandbox.</sub>
 - 跨 provider 协作通过目标后台的新会话与后续消息实现；thread ID 属于原后台，派生不迁移供应商、不自动复制历史，必要上下文写入派发提示。<br><sub>Cross-provider collaboration uses destination sessions and follow-up messages. A thread ID stays with its original backend; forking neither migrates providers nor copies history automatically. Include the necessary context in the delegated prompt.</sub>
+
+## 验证与维护<br><sub>Validation and maintenance</sub>
+
+`requirements.lock` 锁定运行依赖版本及发行文件的 SHA-256，构建工具版本由 `pyproject.toml` 锁定。在源码目录使用已安装的环境运行以下检查；回归测试使用临时目录和模拟后台，不需要真实模型凭据。<br><sub>`requirements.lock` pins runtime dependency versions and distribution SHA-256 hashes; `pyproject.toml` pins the build backend. Run these checks from the checkout using the installed environment; regression tests use temporary directories and mock backends without real model credentials.</sub>
+
+```bash
+python -m pip check
+python -m unittest discover -s tests -q
+```
 
 ## 许可<br><sub>Licensing</sub>
 

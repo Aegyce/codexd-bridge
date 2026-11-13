@@ -397,6 +397,12 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("thread/delete failed", message)
         self.assertIsInstance(caught.exception.__cause__, KeyboardInterrupt)
 
+    def test_interrupt_during_cleanup_reports_the_owned_thread(self):
+        self.server.fail_delete = KeyboardInterrupt()
+        with self.assertRaisesRegex(ProbeError, "probe-thread.*cleaned up"):
+            self.check()
+        self.assertEqual(self.server.deleted, [{"threadId": "probe-thread"}])
+
     def test_creation_timeout_without_id_is_unknown_and_never_deletes(self):
         self.server.fail_start = BridgeError(
             "thread/start: outcome unknown; inspect session state before retrying"

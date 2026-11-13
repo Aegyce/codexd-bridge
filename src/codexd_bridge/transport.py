@@ -10,6 +10,8 @@ from typing import Any
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from websockets.sync.client import unix_connect
 
+from . import __version__
+
 
 class BridgeError(RuntimeError):
     """An operation failed without an automatic retry or provider fallback."""
@@ -35,7 +37,7 @@ class AppServer:
             hello = self.call(
                 "initialize",
                 {
-                    "clientInfo": {"name": "codexd_bridge", "version": "0.1.0"},
+                    "clientInfo": {"name": "codexd_bridge", "version": __version__},
                     "capabilities": {"experimentalApi": True},
                 },
             )

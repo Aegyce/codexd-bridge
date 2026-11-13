@@ -78,9 +78,7 @@ class CliTests(unittest.TestCase):
         return self.run_cli("connect", "demo", "--executable", str(self.executable), *extra)
 
     def connect_error(self, *extra):
-        return self.run_cli_error(
-            "connect", "demo", "--executable", str(self.executable), *extra
-        )
+        return self.run_cli_error("connect", "demo", "--executable", str(self.executable), *extra)
 
     def test_connect_verifies_model_before_install_register_enable(self):
         out, _ = self.connect()
@@ -95,7 +93,7 @@ class CliTests(unittest.TestCase):
             ["check", "install", "register", "enable"],
         )
         self.check.assert_called_once_with(self.backend)
-        self.install.assert_called_once_with(self.home)
+        self.install.assert_called_once_with(self.home, update=False)
         self.register.assert_called_once_with(
             self.home, self.executable, self.config.resolve(), allow_session_writes=False
         )
@@ -114,13 +112,13 @@ class CliTests(unittest.TestCase):
         err = self.connect_error()
         self.assertIn("MCP registration failed", err)
         self.assertIn(str(self.skill), err)
-        self.install.assert_called_once_with(self.home)
+        self.install.assert_called_once_with(self.home, update=False)
         self.enable.assert_not_called()
 
     def test_connect_policy_override_does_not_enable(self):
         self.register.return_value = {"effective": False}
         err = self.connect_error()
-        self.assertIn("overridden by policy", err)
+        self.assertIn("not effective", err)
         self.enable.assert_not_called()
 
     def test_connect_session_writes_require_explicit_flag(self):
@@ -129,6 +127,16 @@ class CliTests(unittest.TestCase):
         flags = [kwargs["allow_session_writes"] for _, kwargs in self.register.call_args_list]
         self.assertEqual(flags, [False, True])
         self.assertEqual(self.enable.call_count, 2)
+
+    def test_skill_upgrade_requires_explicit_flag(self):
+        self.connect("--update-skill")
+        self.install.assert_called_once_with(self.home, update=True)
+
+    def test_enable_failure_reports_completed_integration_steps(self):
+        self.enable.side_effect = ValueError("registry unavailable")
+        err = self.connect_error()
+        self.assertIn("MCP registered", err)
+        self.assertIn("Enabling backend demo failed", err)
 
     def test_connect_requires_existing_absolute_executable(self):
         for executable in (str(self.home / "missing-exe"), "relative-exe"):

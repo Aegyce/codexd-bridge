@@ -19,6 +19,7 @@ class FakeServer:
         self.active_on_resume = False
         self.wrong_created_provider = False
         self.turns = []
+        self.live_turns = []
         self.items = []
 
     def __enter__(self):
@@ -53,7 +54,7 @@ class FakeServer:
                 ]
             }
         if method == "thread/read":
-            return {"thread": self.thread()}
+            return {"thread": {**self.thread(), "turns": self.live_turns}}
         if method in ("thread/start", "thread/resume", "thread/fork"):
             self.model = params.get("model", self.model)
             self.effort = params.get("config", {}).get("model_reasoning_effort", self.effort)
@@ -98,6 +99,13 @@ class SessionsTests(unittest.TestCase):
         return self.bridge.create_session(
             "qwen", "Inspect this module", "Inspection", str(self.home), **kwargs
         )
+
+    def test_active_turn_is_not_reported_as_interrupted_from_stale_history(self):
+        self.server.status = "active"
+        self.server.turns = [{"id": "turn", "status": "interrupted"}]
+        self.server.live_turns = [{"id": "turn", "status": "inProgress"}]
+        result = self.bridge.read_session("qwen", "owned-thread")
+        self.assertEqual(result["turns"][0]["status"], "inProgress")
 
     def test_two_backends_are_routed_to_independent_servers(self):
         for backend in ("openai", "qwen"):
