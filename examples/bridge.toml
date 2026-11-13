@@ -1,0 +1,11 @@
+# Aliases identify routes, while model_provider must match the target daemon.
+[backends.openai]
+home = "~/.codex"
+model_provider = "openai"
+
+[backends.qwen]
+home = "~/.codex/provider-homes/qwen"
+model_provider = "qwen"
+# Optional defaults apply only to newly created sessions.
+# default_model = "qwen4-max-preview"
+# default_effort = "high"

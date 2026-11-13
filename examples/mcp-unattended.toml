@@ -1,0 +1,13 @@
+# Opt-in only: merge these entries after authorizing unattended delegation
+# through this specific local bridge. Other MCP tools are unaffected.
+[mcp_servers.codexd-bridge.tools.create_session]
+approval_mode = "approve"
+
+[mcp_servers.codexd-bridge.tools.send_message]
+approval_mode = "approve"
+
+[mcp_servers.codexd-bridge.tools.fork_session]
+approval_mode = "approve"
+
+[mcp_servers.codexd-bridge.tools.steer_session]
+approval_mode = "approve"
