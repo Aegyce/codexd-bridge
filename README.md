@@ -5,6 +5,10 @@
 Manage independent Codex daemons, discover provider models, and delegate tasks across providers through MCP.
 A keyboard TUI guides setup and everyday operations.
 
+![TUI home screen: provider manager and available actions](docs/images/tui-manager.png)
+
+*Home screen opened by `codexd-bridge`, shown with unverified demonstration backends.*
+
 ## Prerequisites
 
 - Linux (including WSL), Python 3.11+ with `venv`, and the `codex` CLI.
@@ -71,10 +75,6 @@ install its launcher. If setup is incomplete, choose **Retry connection**.
 ## Everyday operations
 
 Select a backend on the home screen, then choose an action.
-
-![Running TUI: provider manager with demonstration backends](docs/images/tui-manager.png)
-
-*The example backends are unverified demonstration entries.*
 
 | Goal | TUI entry | Result |
 | --- | --- | --- |

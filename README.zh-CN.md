@@ -4,6 +4,10 @@
 
 管理独立 Codex daemon，发现供应商模型，并通过 MCP 跨供应商派发任务。使用键盘 TUI 完成配置和日常操作。
 
+![TUI 首页：供应商管理器及可选操作](docs/images/tui-manager.png)
+
+*运行 `codexd-bridge` 后的首页，图中使用尚未验证的演示后端。*
+
 ## 使用前提
 
 - Linux（含 WSL）、Python 3.11+ 及其 `venv` 模块，以及 `codex` CLI。
@@ -65,10 +69,6 @@ codexd-bridge
 ## 日常操作
 
 在首页选中目标后端，再选择对应操作。
-
-![TUI 运行画面：包含演示后端的供应商管理首页](docs/images/tui-manager.png)
-
-*图中的后端为尚未验证的演示配置。*
 
 | 要做什么 | TUI 入口 | 操作结果 |
 | --- | --- | --- |
