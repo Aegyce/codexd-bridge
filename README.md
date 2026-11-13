@@ -21,72 +21,45 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-## Create a provider
-
-Export the API key in your shell, then supply the provider's endpoint, model ID,
-and documented context limit (the values below are examples):
+## Open the manager
 
 ```bash
-codexd-bridge provider add demo \
-  --base-url https://provider.example/v1 --env-key DEMO_API_KEY \
-  --model MODEL_ID --context-window 131072
-codex-demo
+codexd-bridge
 ```
 
-This creates an independent home, verifies real inference, connects MCP, and
-installs `codex-demo` in `~/.local/bin` (add that directory to `PATH`). Only the
-environment variable name is saved. Existing homes and launchers are preserved.
-Use `--wire-api chat` for Chat Completions, `--effort` for a supported reasoning
-level, or `--model-catalog /absolute/catalog.json` for an existing native catalog.
-Without a catalog, only the declared model is listed; automatic compaction is
-set to 80% of its context limit.
+The terminal interface is the main entry point. Use it to:
 
-If setup fails after creating the home, fix the reported issue and run
-`codexd-bridge provider connect demo` to verify and install its launcher.
-`codex-demo server start|status|stop` controls only that provider's daemon.
+- Create a provider or attach an existing Codex home.
+- Check, start and stop a daemon; verify access and connect the bridge.
+- Browse provider models and test a selected model and reasoning level.
+- Create, read, continue and fork sessions; add instructions to an active turn.
+- Install a `codex-NAME` launcher or open that provider's native Codex interface.
 
-## Connect an existing provider
+Use **Tab / Shift+Tab** to move, **Enter** to choose, **Ctrl+S** to submit,
+**Esc** to go back, and **Ctrl+Q** to exit. All workflows support keyboard
+navigation. The minimum terminal size is 60 columns by 18 rows.
 
-1. Create `~/.config/codexd-bridge/config.toml` (see the [example](examples/bridge.toml)):
+New providers reference an API key environment variable already exported in the
+terminal; enter its **name**, such as `DEMO_API_KEY`, in the form. The bridge
+never saves the key value. Supply the provider's endpoint, model ID and documented
+context limit. Setup verifies a real response before enabling the route and
+installing its launcher. If setup is incomplete, use **Retry connection** or
+**Connect bridge** and **Install launcher** from the provider manager.
 
-   ```toml
-   [backends.demo]
-   home = "~/.codex"          # existing Codex home for this provider
-   model_provider = "openai"  # exact provider ID declared in that home
-   enabled = false           # connect enables the route after verification
-   ```
+The interface shows actual setup stages and keeps running while daemon requests
+complete. **Open Codex** returns to the manager when the native interface closes.
+Stopping a daemon requires confirmation. Unattended delegation is enabled only
+when explicitly selected under **Connect bridge**.
 
-2. If the backend daemon is not already running, start it and confirm readiness
-   (the home's `config.toml` must declare the same `model_provider`):
-
-   ```bash
-   codexd-bridge daemon start demo
-   codexd-bridge daemon status demo
-   ```
-
-3. Connect the running daemon and list its models. Connection includes a short
-   model request to verify access.
-
-   ```bash
-   codexd-bridge connect demo
-   codexd-bridge models list
-   ```
-
-   Add `--allow-session-writes` only to pre-approve the four session mutation
-   tools for unattended delegation.
-
-4. Add another provider under a different `[backends.NAME]` entry and repeat
-   steps 2–3. Open a Codex session on a connected backend and ask it to delegate:
-
-   > List the bridge backends and available models, then ask BACKEND_NAME to
-   > review /absolute/path/to/project. Read its response when the task finishes.
-
-Use `codexd-bridge --help` for more commands, including creating a new daemon home.
+For a different registry, run `codexd-bridge --config /absolute/bridge.toml ui`.
+Command-line operations remain available for automation through `--help`.
+MCP clients use `codexd-bridge serve`; the no-argument entry also preserves MCP
+stdio behavior when launched through pipes.
 
 Bridge calls cannot dispatch back to the calling session or its recorded
 ancestors. Delegation is limited to eight levels by default. After upgrading,
-run `connect NAME --update-skill` on each backend to refresh its MCP tools;
-older bridge sessions without recorded ancestry need fresh task sessions.
+use **Connect bridge → Update the installed bridge skill** on each backend.
+Older bridge sessions without recorded ancestry need fresh task sessions.
 
 ## License
 

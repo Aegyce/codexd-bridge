@@ -111,6 +111,22 @@ class CliTests(unittest.TestCase):
                                  "--env-key", "DEMO_KEY", "--model", "model")
         self.assertIn("--context-window", err)
 
+    def test_terminal_default_and_provider_entry_open_ui(self):
+        with patch("codexd_bridge.cli.sys.stdin.isatty", return_value=True), patch(
+                "codexd_bridge.cli.sys.stdout.isatty", return_value=True), patch("codexd_bridge.tui.run_ui") as ui:
+            for argv in ([], ["ui"], ["provider"], ["provider", "add"]):
+                cli.main(["--config", str(self.config), *argv])
+            self.assertEqual(ui.call_count, 4)
+            ui.assert_called_with(self.config)
+
+    def test_piped_default_and_explicit_serve_keep_mcp_protocol(self):
+        with patch("codexd_bridge.cli.sys.stdin.isatty", return_value=False), patch(
+                "codexd_bridge.server.create_server") as server, patch("codexd_bridge.tui.run_ui") as ui:
+            self.run_cli()
+            self.run_cli("serve")
+            self.assertEqual(server.call_count, 2)
+            ui.assert_not_called()
+
     def test_connect_verifies_model_before_install_register_enable(self):
         out, _ = self.connect()
         result = json.loads(out)

@@ -23,15 +23,16 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--config", type=Path, help="Bridge backend registry TOML")
     commands = result.add_subparsers(dest="command")
-    commands.add_parser("serve", help="Run the MCP stdio server (default)")
+    commands.add_parser("ui", help="Open the interactive provider, model and session manager")
+    commands.add_parser("serve", help="Run the MCP stdio server")
     provider = commands.add_parser("provider", help="Configure providers and codex-NAME launchers")
-    provider_actions = provider.add_subparsers(dest="provider_action", required=True)
+    provider_actions = provider.add_subparsers(dest="provider_action")
     add = provider_actions.add_parser("add", help="Create and verify a new provider from connection settings")
-    add.add_argument("name")
-    add.add_argument("--base-url", required=True)
-    add.add_argument("--env-key", required=True, help="API key environment variable NAME, not its value")
-    add.add_argument("--model", required=True)
-    add.add_argument("--context-window", type=int, required=True, help="Provider's documented context limit in tokens")
+    add.add_argument("name", nargs="?", help="Omit to open the TUI")
+    add.add_argument("--base-url")
+    add.add_argument("--env-key", help="API key environment variable NAME, not its value")
+    add.add_argument("--model")
+    add.add_argument("--context-window", type=int, help="Provider's documented context limit in tokens")
     add.add_argument("--effort")
     add.add_argument("--wire-api", choices=("responses", "chat"), default="responses")
     add.add_argument("--model-catalog", type=Path, help="Existing native model catalog; otherwise declare only --model")
@@ -105,6 +106,14 @@ def main(argv: list[str] | None = None) -> None:
     args = argument_parser.parse_args(argv)
     try:
         config = registry_path(args.config)
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if (args.command == "ui" or (args.command is None and interactive)
+                or (args.command == "provider" and (args.provider_action is None
+                    or (args.provider_action == "add" and args.name is None)))):
+            from .tui import run_ui
+
+            run_ui(config)
+            return
         if args.command in (None, "serve"):
             from .server import create_server
 
@@ -124,6 +133,12 @@ def main(argv: list[str] | None = None) -> None:
                 options = dict(launcher_dir=args.launcher_dir, executable=args.executable,
                                registry_path=config, timeout=args.timeout)
                 if args.provider_action == "add":
+                    missing = ["--" + key.replace("_", "-") for key in
+                               ("base_url", "env_key", "model", "context_window")
+                               if getattr(args, key) is None]
+                    if missing:
+                        raise ValueError("Missing " + ", ".join(missing)
+                                         + "; run codexd-bridge to use the interactive manager")
                     output = add_provider(
                         args.name, args.base_url, args.env_key, args.model, args.context_window,
                         effort=args.effort, wire_api=args.wire_api, home=args.home,
@@ -178,9 +193,7 @@ def main(argv: list[str] | None = None) -> None:
                     backend, model=args.model, effort=args.effort, timeout=args.timeout
                 )
             elif args.command == "connect":
-                from .integration import install_skill, register_bridge
-                from .probe import check_model
-                from .provisioning import set_backend_enabled
+                from .integration import connect_backend
 
                 executable = args.executable
                 if executable is None:
@@ -198,41 +211,8 @@ def main(argv: list[str] | None = None) -> None:
                     raise ValueError(
                         "Provide an existing executable file at an absolute --executable path"
                     )
-                verification = check_model(backend)
-                skill = install_skill(backend.home, update=args.update_skill)
-                try:
-                    registration = register_bridge(
-                        backend.home,
-                        executable,
-                        config,
-                        allow_session_writes=args.allow_session_writes,
-                    )
-                except Exception as error:
-                    raise BridgeError(
-                        f"Discovery skill installed at {skill}; MCP registration failed: {error}"
-                    ) from error
-                if registration.get("effective") is False:
-                    raise BridgeError(
-                        "MCP registration is not effective; enabling was skipped. "
-                        + str(
-                            registration.get("warning")
-                            or "Check tool discovery and configuration policy"
-                        )
-                    )
-                try:
-                    set_backend_enabled(backend.name, True, registry_path=config)
-                except (ValueError, OSError) as error:
-                    raise BridgeError(
-                        f"Model verified; skill installed at {skill}; MCP registered. "
-                        f"Enabling backend {backend.name} failed: {error}"
-                    ) from error
-                output = {
-                    "backend": backend.name,
-                    "skill": str(skill),
-                    "registration": registration,
-                    "verification": verification,
-                    "enabled": True,
-                }
+                output = connect_backend(backend, executable, config, update_skill=args.update_skill,
+                                         allow_session_writes=args.allow_session_writes)
             else:
                 from .provisioning import daemon_action
 

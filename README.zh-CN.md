@@ -20,56 +20,29 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-## 创建供应商
-
-先在 shell 中导出 API Key 环境变量，再填写供应商的接口地址、模型 ID 和文档规定的上下文上限。以下参数仅作示例：
+## 打开管理界面
 
 ```bash
-codexd-bridge provider add demo \
-  --base-url https://provider.example/v1 --env-key DEMO_API_KEY \
-  --model MODEL_ID --context-window 131072
-codex-demo
+codexd-bridge
 ```
 
-命令会创建独立目录、验证真实推理、接入 MCP，并将 `codex-demo` 安装到 `~/.local/bin`；请将该目录加入 `PATH`。配置只保存环境变量名，已有目录和启动命令不会被覆盖。
-Chat Completions 接口使用 `--wire-api chat`；推理强度使用 `--effort`；已有原生模型目录可通过 `--model-catalog /absolute/catalog.json` 指定。未提供目录时，只登记指定模型，并将自动压缩阈值设为上下文上限的 80%。
+TUI 是主要使用入口，支持以下操作：
 
-如果创建目录后接入失败，修复报错原因，再运行 `codexd-bridge provider connect demo` 完成验证和启动器安装。`codex-demo server start|status|stop` 管理该供应商的 daemon。
+- 创建 provider，或接入已有 Codex 目录。
+- 查看、启动和停止 daemon，验证访问并接入桥接层。
+- 浏览各 provider 的模型，按选定的模型和推理强度验证真实推理。
+- 创建、阅读、继续及派生会话，向活动执行轮次追加指令。
+- 安装 `codex-NAME` 启动命令，或打开该 provider 的原生 Codex 界面。
 
-## 接入已有供应商
+使用 **Tab / Shift+Tab** 移动焦点、**Enter** 选择、**Ctrl+S** 提交、**Esc** 返回、**Ctrl+Q** 退出。所有操作流程均可通过键盘完成，终端最小尺寸为 60 列、18 行。
 
-1. 创建 `~/.config/codexd-bridge/config.toml`（参见[配置示例](examples/bridge.toml)）：
+创建 provider 时，在表单中填写已导出到当前终端的密钥环境变量**名称**，例如 `DEMO_API_KEY`；桥接层不保存密钥值。填写接口地址、模型 ID 和文档规定的上下文上限后，程序会验证真实响应，再启用后端并安装启动命令。创建未完成时，可选择 **Retry connection**，或回到管理页使用 **Connect bridge** 和 **Install launcher** 继续处理。
 
-   ```toml
-   [backends.demo]
-   home = "~/.codex"          # 已有的 Codex 供应商目录
-   model_provider = "openai"  # 必须与该目录中声明的供应商 ID 一致
-   enabled = false           # connect 验证通过后启用该后端
-   ```
+界面按实际执行结果显示配置阶段，等待 daemon 响应时仍保持可用。通过 **Open Codex** 打开的原生界面关闭后，会回到管理页。停止 daemon 需要确认；只有在 **Connect bridge** 中明确选择后，才会启用无需逐次审批的任务派发。
 
-2. 如果该后端的 daemon 尚未运行，启动并确认状态；目录中的 `config.toml` 必须声明相同的 `model_provider`：
+使用其他注册表时，运行 `codexd-bridge --config /absolute/bridge.toml ui`。自动化命令可通过 `--help` 查看。MCP 客户端使用 `codexd-bridge serve`；通过管道启动无参数入口时，仍保留 MCP stdio 行为。
 
-   ```bash
-   codexd-bridge daemon start demo
-   codexd-bridge daemon status demo
-   ```
-
-3. 接入正在运行的 daemon，并查看模型列表。接入时会发起一次简短的模型请求，验证实际访问是否可用。
-
-   ```bash
-   codexd-bridge connect demo
-   codexd-bridge models list
-   ```
-
-   如需预先批准四项会话写入工具，以便自动派发任务，可添加 `--allow-session-writes`。
-
-4. 使用另一个 `[backends.NAME]` 条目添加其他供应商，并重复步骤 2–3。在已接入的后端中打开 Codex 会话，即可要求它派发任务：
-
-   > 列出桥接后端和可用模型，然后让 BACKEND_NAME 审查 /absolute/path/to/project。任务完成后读取它的回复。
-
-运行 `codexd-bridge --help` 查看更多命令，包括如何创建新的 daemon 目录。
-
-桥接层禁止向调用会话自身或已记录的上级会话反向派发，默认最多允许八层委派。升级后，在各后端运行 `connect NAME --update-skill` 刷新 MCP 工具；没有调用关系记录的旧桥接会话需重新创建任务会话。
+桥接层禁止向调用会话自身或已记录的上级会话反向派发，默认最多允许八层委派。升级后，在各后端的 **Connect bridge** 中勾选 **Update the installed bridge skill** 完成更新；没有调用关系记录的旧桥接任务需重新创建会话。
 
 ## 许可
 

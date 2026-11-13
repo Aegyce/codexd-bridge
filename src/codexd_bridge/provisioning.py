@@ -2,9 +2,11 @@
 
 'create_daemon' generates a fresh CODEX_HOME (configuration only) and registers
 it in the bridge registry; it never starts a daemon and never overwrites an
-existing home. New routes are registered disabled (enabled = false) pending
-model-availability verification; 'set_backend_enabled' flips that flag under
-the same lock. 'daemon_action' routes start/status/stop to
+existing home. 'attach_daemon' registers an existing independent CODEX_HOME
+as-is, deriving the provider binding from its config.toml without copying or
+modifying anything inside the home. New routes are registered disabled
+(enabled = false) pending model-availability verification; 'set_backend_enabled'
+flips that flag under the same lock. 'daemon_action' routes start/status/stop to
 'codex app-server daemon start|version|stop' with only CODEX_HOME overridden;
 there is no automatic restart.
 
@@ -50,6 +52,7 @@ from .transport import BridgeError
 
 __all__ = [
     "ProvisioningError",
+    "attach_daemon",
     "create_daemon",
     "daemon_action",
     "set_backend_enabled",
@@ -387,6 +390,14 @@ def _register(registry: Path, name: str, entry: dict) -> None:
             raise ProvisioningError(
                 f"backend {name!r} already exists in the registry; refusing to overwrite"
             )
+        # Re-check canonical home reuse under the lock: concurrent registrations
+        # of two aliases of one home can both pass the unlocked pre-check.
+        home_resolved = Path(entry["home"]).expanduser().resolve()
+        for existing_name, item in existing.items():
+            if Path(item["home"]).expanduser().resolve() == home_resolved:
+                raise ProvisioningError(
+                    f"home is already used by backend {existing_name!r}; homes must be independent"
+                )
         merged = {**existing, name: entry}
         _atomic_write(registry, _toml_dumps({**data, "backends": merged}))
 
@@ -578,6 +589,124 @@ def create_daemon(
         _rollback_home(home_path)
         raise
     return backend
+
+
+def attach_daemon(
+    name: str,
+    home: Path,
+    *,
+    registry_path: Path | None = None,
+) -> Backend:
+    """Register an existing independent daemon home as-is; never modify or start it.
+
+    'home' must be an existing directory (absolute after '~' expansion); a
+    symlink to a directory is accepted and collisions are checked against the
+    canonical path. home/config.toml must be a regular file (symlinks are
+    refused) containing valid TOML, and it is the only file ever read:
+    'model_provider' must be set explicitly to a non-empty provider id (there
+    is no silent 'openai' fallback), while 'model' and 'model_reasoning_effort'
+    become default_model/default_effort only when present and valid. Nothing
+    inside the home is copied, created or overwritten (config, auth.json,
+    session history and logs stay byte-identical), no daemon is started and no
+    model probe is run; error messages never echo configuration values.
+
+    The route is registered with enabled = false through the same flock +
+    atomic replace as create_daemon, preserving every other backend and
+    top-level field (including delegation) verbatim. Duplicate names and homes
+    already used by another backend (including symlink aliases of the same
+    directory) are refused. 'registry_path' resolves like config.load_backends
+    and must not live inside the attached home or point at its config.toml.
+    Enable the route with set_backend_enabled after your own availability
+    verification.
+    """
+    if not isinstance(name, str) or not _BACKEND_NAME_RE.fullmatch(name):
+        raise ProvisioningError(
+            "name must start with a lowercase ASCII letter and contain only "
+            "lowercase ASCII letters, digits, '_' or '-'"
+        )
+    if len(name) > _MAX_TEXT_LENGTH:
+        raise ProvisioningError(f"name must be at most {_MAX_TEXT_LENGTH} characters")
+
+    if not isinstance(home, str | os.PathLike):
+        raise ProvisioningError("home must be a path")
+    home_path = _expand_user(Path(home), "home")
+    if not home_path.is_absolute():
+        raise ProvisioningError("home must be an absolute path after '~' expansion")
+    if "\x00" in str(home_path):
+        raise ProvisioningError("home must not contain NUL characters")
+    if not home_path.is_dir():
+        raise ProvisioningError(
+            "home must be an existing directory; attach never creates or modifies a home"
+        )
+
+    registry, _source = _resolve_config_path(registry_path)
+    home_resolved = home_path.resolve()
+    registry_resolved = registry.resolve()
+    if registry_resolved == home_resolved or home_resolved in registry_resolved.parents:
+        raise ProvisioningError(
+            "registry path must not be inside the attached daemon home or point at its config.toml"
+        )
+
+    config_path = home_path / "config.toml"
+    if not os.path.lexists(config_path):
+        raise ProvisioningError("home does not contain config.toml; nothing is created")
+    if config_path.is_symlink() or not config_path.is_file():
+        raise ProvisioningError("home config.toml must be a regular file (symlinks are refused)")
+    try:
+        with config_path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except FileNotFoundError:
+        raise ProvisioningError("home does not contain config.toml; nothing is created") from None
+    except OSError:
+        raise ProvisioningError("home config.toml cannot be read") from None
+    except tomllib.TOMLDecodeError:
+        # Decoder messages may quote configuration fragments; suppress them.
+        raise ProvisioningError("home config.toml is not valid TOML") from None
+
+    if "model_provider" not in data:
+        raise ProvisioningError(
+            "home config.toml must set 'model_provider' explicitly; no provider is assumed"
+        )
+    provider = _text(data["model_provider"], "home config.toml field 'model_provider'")
+    model_name = None
+    if "model" in data:
+        model_name = _text(data["model"], "home config.toml field 'model'")
+    effort_value = None
+    if "model_reasoning_effort" in data:
+        effort_value = _text(
+            data["model_reasoning_effort"], "home config.toml field 'model_reasoning_effort'"
+        )
+
+    existing = _load_registry(registry)["backends"]
+    if name in existing:
+        raise ProvisioningError(
+            f"backend {name!r} already exists in the registry; refusing to overwrite"
+        )
+    for existing_name, item in existing.items():
+        if Path(item["home"]).expanduser().resolve() == home_resolved:
+            raise ProvisioningError(
+                f"home is already used by backend {existing_name!r}; homes must be independent"
+            )
+
+    entry: dict[str, Any] = {"home": str(home_path), "model_provider": provider}
+    if model_name is not None:
+        entry["default_model"] = model_name
+    if effort_value is not None:
+        entry["default_effort"] = effort_value
+    entry["enabled"] = False
+
+    try:
+        _register(registry, name, entry)
+    except OSError as error:
+        raise ProvisioningError(f"cannot update registry ({error.strerror})") from None
+    return Backend(
+        name=name,
+        home=home_path,
+        model_provider=provider,
+        default_model=model_name,
+        default_effort=effort_value,
+        enabled=False,
+    )
 
 
 def set_backend_enabled(

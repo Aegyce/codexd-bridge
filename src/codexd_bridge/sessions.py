@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .config import Backend, ConfigError, load_backends
-from .delegation import DelegationGuard, SessionRef
+from .delegation import DelegationGuard, OperatorGuard, SessionRef
 from .transport import AppServer, BridgeError
 
 
@@ -137,7 +137,7 @@ def text_messages(items: list[dict], budget: int) -> tuple[list[dict], int]:
 class Bridge:
     def __init__(
         self, config_path: Path | None = None, connector: Callable = AppServer,
-        *, guard: DelegationGuard | None = None,
+        *, guard: DelegationGuard | OperatorGuard | None = None,
     ):
         self.config_path = config_path
         self.connector = connector

@@ -63,6 +63,37 @@ class IntegrationError(BridgeError):
     """Installation or registration was refused; nothing was silently overwritten."""
 
 
+def connect_backend(backend, executable: Path, registry: Path, *, update_skill=False,
+                    allow_session_writes=False, progress=None):
+    """Verify and connect a running backend, shared by the CLI and terminal UI."""
+    from .probe import check_model
+    from .provisioning import set_backend_enabled
+
+    if progress:
+        progress("verification")
+    verification = check_model(backend)
+    if progress:
+        progress("integration")
+    skill = install_skill(backend.home, update=update_skill)
+    try:
+        registration = register_bridge(backend.home, executable, registry,
+                                       allow_session_writes=allow_session_writes)
+    except Exception as error:
+        raise BridgeError(f"Discovery skill installed at {skill}; MCP registration failed: {error}") from error
+    if registration.get("effective") is False:
+        raise BridgeError("MCP registration is not effective; enabling was skipped. "
+                          + str(registration.get("warning") or "Check tool discovery and configuration policy"))
+    try:
+        set_backend_enabled(backend.name, True, registry_path=registry)
+    except (ValueError, OSError) as error:
+        raise BridgeError(f"Model verified; skill installed at {skill}; MCP registered. "
+                          f"Enabling backend {backend.name} failed: {error}") from error
+    if progress:
+        progress("ready")
+    return {"backend": backend.name, "skill": str(skill), "registration": registration,
+            "verification": verification, "enabled": True}
+
+
 def _default_source() -> Path:
     """Keep resources beside the package for venv, user and editable installs."""
     return Path(__file__).resolve().with_name("skill")

@@ -14,7 +14,7 @@ import shlex
 import shutil
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from .config import (
@@ -68,7 +68,22 @@ _SHORT_VALUE = frozenset({"-c", "-m", "-p", "-s", "-C", "-i"})
 
 
 class ProviderError(BridgeError):
-    """Onboarding or launch failed; route state is preserved and no launcher is active."""
+    """Onboarding or launch failed; route state is preserved and no launcher is active.
+
+    The optional keyword-only ``detail`` carries the cause text alone, without the
+    retry-command advice, for structured UI feedback; ``str(error)`` keeps the full
+    CLI wording. It is None when no cause was attached.
+    """
+
+    def __init__(self, message: str, *, detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
+
+
+def _progress_stage(progress: Callable[[str], None] | None, stage: str) -> None:
+    """Report an onboarding stage on entry; silent when no callback was given."""
+    if progress is not None:
+        progress(stage)
 
 
 def _validate_name(name: str) -> str:
@@ -222,9 +237,11 @@ def _ensure_running(backend, timeout: float) -> dict:
 
 
 def _retry_command(name, registry, launcher_dir_path, executable_path) -> str:
-    parts = ["codexd-bridge", "provider", "connect", name]
+    # --config is a global CLI flag and must precede the 'provider connect' subcommand.
+    parts = ["codexd-bridge"]
     if registry != _resolve_config_path(None)[0].absolute():
         parts += ["--config", str(registry)]
+    parts += ["provider", "connect", name]
     if launcher_dir_path != _expand_user(DEFAULT_LAUNCHER_DIR, "launcher_dir"):
         parts += ["--launcher-dir", str(launcher_dir_path)]
     try:
@@ -244,6 +261,7 @@ def connect_provider(
     registry_path: Path | None = None,
     timeout: float = 60,
     client_factory=AppServer,
+    progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Verify, integrate, enable and install the launcher for an existing route (retry-safe).
 
@@ -251,6 +269,9 @@ def connect_provider(
     and enables the route only on full success. On failure the route's enabled state
     is preserved and no new launcher is left. An identical existing launcher is kept;
     a differing one is refused. Works with non-default registry/launcher/executable.
+
+    With ``progress``, reports each stage on entry: 'daemon', 'verification',
+    'integration', 'launcher', and 'ready' only after full success.
     """
     name = _validate_name(name)
     registry = _resolve_config_path(registry_path)[0].absolute()
@@ -269,8 +290,11 @@ def connect_provider(
     present = _existing_launcher(launcher_path, text)
     ident = None
     try:
+        _progress_stage(progress, "daemon")
         _ensure_running(backend, timeout)
+        _progress_stage(progress, "verification")
         verification = check_model(backend, timeout=timeout, client_factory=client_factory)
+        _progress_stage(progress, "integration")
         skill = install_skill(backend.home)
         registration = register_bridge(
             backend.home, executable_path, registry, client_factory=client_factory
@@ -280,6 +304,7 @@ def connect_provider(
                 "MCP registration is not effective; "
                 + str(registration.get("warning") or "check tool discovery and configuration policy")
             )
+        _progress_stage(progress, "launcher")
         if not present:
             ident = _install_launcher(launcher_path, text)
         set_backend_enabled(name, True, registry_path=registry)
@@ -290,9 +315,11 @@ def connect_provider(
             raise ProviderError(
                 f"provider {name!r} connect failed; route state preserved and no new launcher "
                 f"installed. Retry with: {_retry_command(name, registry, launcher_dir_path, executable_path)}. "
-                f"Cause: {error}"
+                f"Cause: {error}",
+                detail=str(error),
             ) from error
         raise
+    _progress_stage(progress, "ready")
     return {
         "backend": name,
         "home": str(backend.home),
@@ -320,6 +347,7 @@ def add_provider(
     wire_api: str = "responses",
     timeout: float = 60,
     client_factory=AppServer,
+    progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Create a disabled route from connection settings, then connect_provider it.
 
@@ -327,6 +355,9 @@ def add_provider(
     (home/model-catalog.json) unless an external catalog is referenced; an external
     catalog must already declare the selected model with the same context window and
     80% compaction. Existing routes/homes/launchers (incl. dangling symlinks) are refused.
+
+    With ``progress``, reports 'configuration' after validation just before home
+    creation, then forwards the callback to connect_provider for its stages.
     """
     name = _validate_name(name)
     base_url = _base_url(base_url, f"provider {name!r}")
@@ -389,6 +420,7 @@ def add_provider(
     with tempfile.TemporaryDirectory(prefix="codexd-provider-") as tmp:
         template = Path(tmp)
         (template / "config.toml").write_text(_toml_dumps(template_config), encoding="utf-8")
+        _progress_stage(progress, "configuration")
         create_daemon(
             name, home_path, name, model,
             registry_path=registry, template_home=template, effort=effort, catalog_text=catalog_text,
@@ -397,6 +429,7 @@ def add_provider(
     result = connect_provider(
         name, launcher_dir=launcher_dir_path, executable=executable_path,
         registry_path=registry, timeout=timeout, client_factory=client_factory,
+        progress=progress,
     )
     return {
         **result,

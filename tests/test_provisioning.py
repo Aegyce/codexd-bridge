@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import tomllib
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,8 @@ from codexd_bridge.config import Backend, ConfigError, load_backends
 from codexd_bridge.provisioning import (
     ProvisioningError,
     _atomic_write,
+    _load_registry,
+    attach_daemon,
     create_daemon,
     daemon_action,
     set_backend_enabled,
@@ -544,6 +547,441 @@ class CreateDaemonTests(ProvisioningTestCase):
     def test_error_is_value_error(self):
         with self.assertRaises(ValueError):
             create_daemon("gpt", self.home("gpt"), "openai", "", registry_path=self.registry)
+
+
+class AttachDaemonTests(ProvisioningTestCase):
+    """attach_daemon registers existing homes without touching their contents."""
+
+    def make_home(self, name="qwen", *, config=None) -> Path:
+        home = self.home(name)
+        home.mkdir()
+        if config is None:
+            config = (
+                'model_provider = "qwen"\n'
+                'model = "qwen3-max"\n'
+                'model_reasoning_effort = "high"\n'
+                "\n"
+                "[model_providers.qwen]\n"
+                'name = "Qwen"\n'
+                'base_url = "https://dashscope.example.invalid/compatible-mode/v1"\n'
+                'env_key = "QWEN_API_KEY"\n'
+            )
+        (home / "config.toml").write_text(config, encoding="utf-8")
+        (home / "auth.json").write_text('{"OPENAI_API_KEY": "sk-HOME-SECRET"}', encoding="utf-8")
+        (home / "sessions").mkdir()
+        (home / "sessions" / "rollout.jsonl").write_text('{"private": true}\n', encoding="utf-8")
+        return home
+
+    def snapshot(self, home: Path) -> dict:
+        return {
+            str(path.relative_to(home)): path.read_bytes()
+            for path in sorted(home.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_registers_disabled_with_derived_binding(self):
+        home = self.make_home()
+        backend = attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertIsInstance(backend, Backend)
+        self.assertEqual(backend.name, "qwen")
+        self.assertEqual(backend.home, home)
+        self.assertEqual(backend.model_provider, "qwen")
+        self.assertEqual(backend.default_model, "qwen3-max")
+        self.assertEqual(backend.default_effort, "high")
+        self.assertIs(backend.enabled, False)
+        self.assertEqual(backend.socket_path, home / "app-server-control/app-server-control.sock")
+        self.assertEqual(
+            self.read_registry()["qwen"],
+            {
+                "home": str(home),
+                "model_provider": "qwen",
+                "default_model": "qwen3-max",
+                "default_effort": "high",
+                "enabled": False,
+            },
+        )
+        self.assertEqual(load_backends(self.registry)["qwen"], backend)
+        self.run.assert_not_called()
+
+    def test_source_home_untouched(self):
+        home = self.make_home()
+        (home / "config.toml").chmod(0o644)
+        before = self.snapshot(home)
+        names_before = sorted(str(p.relative_to(home)) for p in home.rglob("*"))
+        attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertEqual(self.snapshot(home), before)
+        self.assertEqual(sorted(str(p.relative_to(home)) for p in home.rglob("*")), names_before)
+        self.assertEqual(mode(home / "config.toml"), 0o644)
+        registry_text = self.registry.read_text()
+        for fragment in ("sk-HOME-SECRET", "dashscope.example.invalid", "QWEN_API_KEY"):
+            self.assertNotIn(fragment, registry_text)
+        self.run.assert_not_called()
+
+    def test_auth_and_history_never_opened(self):
+        home = self.make_home()
+        for name in ("auth.json", "sessions/rollout.jsonl"):
+            path = home / name
+            path.unlink()
+            path.mkdir()  # opening these as files would raise IsADirectoryError
+        attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertIn("qwen", self.read_registry())
+
+    def test_optional_fields_absent(self):
+        home = self.make_home("bare", config='model_provider = "openai"\n')
+        backend = attach_daemon("bare", home, registry_path=self.registry)
+        self.assertIsNone(backend.default_model)
+        self.assertIsNone(backend.default_effort)
+        self.assertEqual(
+            self.read_registry()["bare"],
+            {"home": str(home), "model_provider": "openai", "enabled": False},
+        )
+
+    def test_missing_provider_has_no_fallback(self):
+        for index, config in enumerate(("", 'model = "gpt-5"\n')):
+            with self.subTest(config=config):
+                name = f"bare{index}"
+                home = self.make_home(name, config=config)
+                before = self.snapshot(home)
+                with self.assertRaises(ProvisioningError) as ctx:
+                    attach_daemon(name, home, registry_path=self.registry)
+                self.assertIn("model_provider", str(ctx.exception))
+                self.assertEqual(self.snapshot(home), before)
+        self.assertFalse(self.registry.exists())
+
+    def test_invalid_toml_refused_without_echo(self):
+        home = self.make_home("broken", config='model_provider = "sk-SECRET-FRAGMENT" {{{')
+        before = self.snapshot(home)
+        with self.assertRaises(ProvisioningError) as ctx:
+            attach_daemon("broken", home, registry_path=self.registry)
+        self.assertIn("not valid TOML", str(ctx.exception))
+        self.assertNotIn("sk-SECRET-FRAGMENT", str(ctx.exception))
+        self.assertEqual(self.snapshot(home), before)
+        self.assertFalse(self.registry.exists())
+
+    def test_field_types_and_limits_validated(self):
+        long_text = "x" * 129
+        cases = [
+            "model_provider = 5\n",
+            "model_provider = true\n",
+            'model_provider = ["openai"]\n',
+            'model_provider = ""\n',
+            'model_provider = "   "\n',
+            f'model_provider = "{long_text}"\n',
+            'model_provider = "openai"\nmodel = 5\n',
+            'model_provider = "openai"\nmodel = ""\n',
+            f'model_provider = "openai"\nmodel = "{long_text}"\n',
+            'model_provider = "openai"\nmodel_reasoning_effort = false\n',
+            'model_provider = "openai"\nmodel_reasoning_effort = ""\n',
+            'model_provider = "openai"\nmodel_reasoning_effort = 3\n',
+        ]
+        for index, config in enumerate(cases):
+            with self.subTest(config=config):
+                name = f"case{index}"
+                home = self.make_home(name, config=config)
+                before = self.snapshot(home)
+                with self.assertRaises(ProvisioningError):
+                    attach_daemon(name, home, registry_path=self.registry)
+                self.assertEqual(self.snapshot(home), before)
+        self.assertFalse(self.registry.exists())
+
+    def test_missing_config_refused(self):
+        home = self.home("empty")
+        home.mkdir()
+        with self.assertRaises(ProvisioningError) as ctx:
+            attach_daemon("empty", home, registry_path=self.registry)
+        self.assertIn("config.toml", str(ctx.exception))
+        self.assertEqual(list(home.iterdir()), [])
+        self.assertFalse(self.registry.exists())
+
+    def test_config_must_be_regular_file(self):
+        home = self.make_home("dircfg")
+        config = home / "config.toml"
+        config.unlink()
+        config.mkdir()
+        with self.assertRaises(ProvisioningError):
+            attach_daemon("dircfg", home, registry_path=self.registry)
+
+        home2 = self.make_home("linkcfg")
+        config2 = home2 / "config.toml"
+        real = home2 / "config.real.toml"
+        config2.rename(real)
+        config2.symlink_to(real)
+        before = real.read_bytes()
+        with self.assertRaises(ProvisioningError):
+            attach_daemon("linkcfg", home2, registry_path=self.registry)
+        self.assertEqual(real.read_bytes(), before)
+        self.assertFalse(self.registry.exists())
+
+    def test_home_validation(self):
+        missing = self.home("missing")
+        plain = self.root / "plain-file"
+        plain.write_text("x")
+        dangling = self.root / "dangling"
+        dangling.symlink_to(missing)
+        cases = [
+            5,
+            Path("relative/home"),
+            missing,
+            plain,
+            dangling,
+            Path(f"{self.root}/nul\x00path"),
+        ]
+        for home in cases:
+            with self.subTest(home=home):
+                with self.assertRaises(ProvisioningError):
+                    attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertFalse(self.registry.exists())
+
+    def test_tilde_home_expanded(self):
+        home = self.make_home("tilde")
+        backend = attach_daemon("tilde", Path("~/homes/tilde"), registry_path=self.registry)
+        self.assertEqual(backend.home, home)
+        self.assertEqual(self.read_registry()["tilde"]["home"], str(home))
+
+    def test_symlinked_home_allowed_and_stored_as_given(self):
+        home = self.make_home("real")
+        alias = self.root / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        backend = attach_daemon("viaalias", alias, registry_path=self.registry)
+        self.assertEqual(backend.home, alias)
+        self.assertEqual(backend.model_provider, "qwen")
+        self.assertEqual(self.read_registry()["viaalias"]["home"], str(alias))
+
+    def test_invalid_name(self):
+        home = self.make_home()
+        for bad in ("", "Qwen", "1qwen", "-qwen", "q wen", "qwen!", "qwen.x", "a" * 129):
+            with self.subTest(name=bad):
+                with self.assertRaises(ProvisioningError):
+                    attach_daemon(bad, home, registry_path=self.registry)
+        self.assertFalse(self.registry.exists())
+
+    def test_duplicate_name_refused(self):
+        first = self.make_home("first")
+        attach_daemon("qwen", first, registry_path=self.registry)
+        before = self.registry.read_bytes()
+        second = self.make_home("second")
+        second_before = self.snapshot(second)
+        with self.assertRaises(ProvisioningError) as ctx:
+            attach_daemon("qwen", second, registry_path=self.registry)
+        self.assertIn("already exists", str(ctx.exception))
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.assertEqual(self.snapshot(second), second_before)
+
+    def test_home_reuse_refused_canonically(self):
+        home = self.make_home("real")
+        attach_daemon("first", home, registry_path=self.registry)
+        before = self.registry.read_bytes()
+        alias = self.root / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        with self.assertRaises(ProvisioningError) as ctx:
+            attach_daemon("second", alias, registry_path=self.registry)
+        self.assertIn("first", str(ctx.exception))
+        self.assertEqual(self.registry.read_bytes(), before)
+
+    def test_home_reuse_refused_reverse_and_tilde(self):
+        home = self.make_home("real")
+        alias = self.root / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        attach_daemon("first", alias, registry_path=self.registry)
+        with self.assertRaises(ProvisioningError):
+            attach_daemon("second", home, registry_path=self.registry)
+        # A registry entry written with '~' still collides canonically.
+        registry2 = self.root / "bridge2.toml"
+        registry2.write_text('[backends.old]\nhome = "~/homes/real"\nmodel_provider = "qwen"\n')
+        with self.assertRaises(ProvisioningError) as ctx:
+            attach_daemon("third", home, registry_path=registry2)
+        self.assertIn("old", str(ctx.exception))
+
+    def test_registry_inside_home_refused(self):
+        home = self.make_home()
+        link = self.root / "link-registry.toml"
+        link.symlink_to(home / "config.toml")
+        before = self.snapshot(home)
+        for registry in (home / "bridge.toml", home / "config.toml", home, link):
+            with self.subTest(registry=registry):
+                with self.assertRaises(ProvisioningError) as ctx:
+                    attach_daemon("qwen", home, registry_path=registry)
+                self.assertIn("inside", str(ctx.exception))
+        self.assertEqual(self.snapshot(home), before)
+
+    def test_preserves_delegation_and_other_entries(self):
+        old_home = self.home("old")
+        old_home.mkdir()
+        self.registry.write_text(
+            "[delegation]\nmax_depth = 3\n\n"
+            f'[backends.old]\nhome = "{old_home}"\nmodel_provider = "openai"\n'
+        )
+        home = self.make_home()
+        attach_daemon("qwen", home, registry_path=self.registry)
+        data = tomllib.loads(self.registry.read_text())
+        self.assertEqual(data["delegation"], {"max_depth": 3})
+        self.assertEqual(
+            data["backends"]["old"], {"home": str(old_home), "model_provider": "openai"}
+        )
+        self.assertIs(data["backends"]["qwen"]["enabled"], False)
+        self.assertIs(load_backends(self.registry)["old"].enabled, True)
+
+    def test_invalid_registry_refused(self):
+        home = self.make_home()
+        before_home = self.snapshot(home)
+        self.registry.write_text("not valid toml {{{")
+        before = self.registry.read_bytes()
+        with self.assertRaises(ValueError):
+            attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.assertEqual(self.snapshot(home), before_home)
+
+    def test_registry_symlink_refused(self):
+        home = self.make_home()
+        self.registry.symlink_to(self.root / "real-registry.toml")
+        with self.assertRaises(ProvisioningError):
+            attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertFalse((self.root / "real-registry.toml").exists())
+
+    def test_stale_other_home_does_not_block(self):
+        stale = self.root / "stale-home"
+        self.registry.write_text(f'[backends.old]\nhome = "{stale}"\nmodel_provider = "openai"\n')
+        home = self.make_home()
+        attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertEqual(load_backends(self.registry)["old"].home, stale)
+
+    def test_concurrent_attach(self):
+        homes = {f"b{i}": self.make_home(f"b{i}") for i in range(4)}
+        before = {name: self.snapshot(home) for name, home in homes.items()}
+
+        def worker(index):
+            name = f"b{index}"
+            return attach_daemon(name, homes[name], registry_path=self.registry)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            backends = list(executor.map(worker, range(4)))
+        registry = self.read_registry()
+        self.assertEqual(sorted(registry), ["b0", "b1", "b2", "b3"])
+        for backend in backends:
+            self.assertIs(backend.enabled, False)
+            self.assertIs(registry[backend.name]["enabled"], False)
+        for name, home in homes.items():
+            self.assertEqual(self.snapshot(home), before[name])
+        self.run.assert_not_called()
+
+    def test_lock_collision_keeps_home(self):
+        home = self.make_home()
+        before_home = self.snapshot(home)
+        entry = {"home": str(home), "model_provider": "qwen", "enabled": False}
+        with patch(
+            "codexd_bridge.provisioning._load_registry",
+            side_effect=[{"backends": {}}, {"backends": {"qwen": entry}}],
+        ):
+            with self.assertRaises(ProvisioningError) as ctx:
+                attach_daemon("qwen", home, registry_path=self.registry)
+        self.assertIn("already exists", str(ctx.exception))
+        self.assertEqual(self.snapshot(home), before_home)
+        self.assertFalse(self.registry.exists())
+
+    def test_lock_collision_home_reuse_keeps_home(self):
+        home = self.make_home("real")
+        before = self.snapshot(home)
+        alias = self.root / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        entry = {"home": str(home), "model_provider": "qwen", "enabled": False}
+        # The unlocked pre-check sees an empty registry; the locked re-check
+        # must still refuse the canonically reused home.
+        with patch(
+            "codexd_bridge.provisioning._load_registry",
+            side_effect=[{"backends": {}}, {"backends": {"other": entry}}],
+        ):
+            with self.assertRaises(ProvisioningError) as ctx:
+                attach_daemon("second", alias, registry_path=self.registry)
+        self.assertIn("other", str(ctx.exception))
+        self.assertIn("homes must be independent", str(ctx.exception))
+        self.assertEqual(self.snapshot(home), before)
+        self.assertFalse(self.registry.exists())
+
+    def test_concurrent_aliases_same_home_exactly_one_wins(self):
+        home = self.make_home("real")
+        before = self.snapshot(home)
+        alias = self.root / "alias"
+        alias.symlink_to(home, target_is_directory=True)
+        barrier = threading.Barrier(2)
+        local = threading.local()
+        prechecks = []
+
+        def gated_load(registry):
+            data = _load_registry(registry)
+            if not getattr(local, "prechecked", False):
+                local.prechecked = True
+                prechecks.append(data)
+                # Hold both unlocked pre-checks until each has observed the
+                # registry, forcing both threads past the pre-check window.
+                barrier.wait(timeout=10)
+            return data
+
+        def worker(name, path):
+            return attach_daemon(name, path, registry_path=self.registry)
+
+        with patch("codexd_bridge.provisioning._load_registry", side_effect=gated_load):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = {
+                    "first": executor.submit(worker, "first", home),
+                    "second": executor.submit(worker, "second", alias),
+                }
+                outcomes = {}
+                for name, future in futures.items():
+                    try:
+                        outcomes[name] = ("ok", future.result(timeout=15))
+                    except ProvisioningError as error:
+                        outcomes[name] = ("error", str(error))
+
+        # Both threads passed the unlocked pre-check with an empty registry,
+        # so only the locked re-check can decide the winner.
+        self.assertEqual(len(prechecks), 2)
+        for data in prechecks:
+            self.assertEqual(data["backends"], {})
+        self.assertEqual(sorted(status for status, _ in outcomes.values()), ["error", "ok"])
+        winner = next(name for name, (status, _) in outcomes.items() if status == "ok")
+        self.assertIsInstance(outcomes[winner][1], Backend)
+        loser_message = next(detail for status, detail in outcomes.values() if status == "error")
+        self.assertIn(f"backend {winner!r}", loser_message)
+        self.assertIn("homes must be independent", loser_message)
+        registry = self.read_registry()
+        self.assertEqual(list(registry), [winner])
+        self.assertIs(registry[winner]["enabled"], False)
+        self.assertEqual(Path(registry[winner]["home"]).resolve(), home.resolve())
+        self.assertEqual(self.snapshot(home), before)
+        self.run.assert_not_called()
+
+    def test_atomic_failure_leaves_registry_and_home(self):
+        first = self.make_home("first")
+        attach_daemon("first", first, registry_path=self.registry)
+        before = self.registry.read_bytes()
+        home = self.make_home("second")
+        before_home = self.snapshot(home)
+        with patch("codexd_bridge.provisioning.os.replace", side_effect=OSError("disk full")):
+            with self.assertRaises(ProvisioningError):
+                attach_daemon("second", home, registry_path=self.registry)
+        self.assertEqual(self.registry.read_bytes(), before)
+        self.assertEqual(self.snapshot(home), before_home)
+        self.assertEqual(list(self.registry.parent.glob("*.tmp")), [])
+
+    def test_default_registry_env_var(self):
+        home = self.make_home()
+        env_path = self.root / "env-registry.toml"
+        with patch.dict(os.environ, {"CODEXD_BRIDGE_CONFIG": str(env_path)}):
+            attach_daemon("qwen", home, registry_path=None)
+        self.assertIs(load_backends(env_path)["qwen"].enabled, False)
+
+    def test_enable_after_attach(self):
+        home = self.make_home()
+        before = self.snapshot(home)
+        attach_daemon("qwen", home, registry_path=self.registry)
+        enabled = set_backend_enabled("qwen", True, registry_path=self.registry)
+        self.assertIs(enabled.enabled, True)
+        self.assertEqual(self.snapshot(home), before)
+        self.run.assert_not_called()
+
+    def test_error_is_value_error(self):
+        with self.assertRaises(ValueError):
+            attach_daemon("qwen", self.home("missing"), registry_path=self.registry)
 
 
 class RegistryTests(ProvisioningTestCase):

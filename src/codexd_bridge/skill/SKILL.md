@@ -40,6 +40,7 @@ description: 使用 Codex Daemon Bridge 创建或接入独立 daemon，发现各
 
 ## 新 daemon 与后续会话接入
 
+- 人工配置与管理默认打开 `codexd-bridge` TUI：可创建或接入 provider、启停后台、浏览和验证模型、管理会话并打开原生 Codex。无需让用户拼接创建参数。命令行参数保留给已授权的自动化；MCP 使用显式 `serve` 入口，管道中的无参数启动也保留 MCP 行为。
 - 从接口地址创建新供应商时，用 `codexd-bridge provider add NAME --base-url URL --env-key VARIABLE_NAME --model MODEL --context-window TOKENS`。用户在环境中配置密钥，命令只保存变量名；按实际接口选择 `--wire-api` 和 `--effort`。检查通过后生成 `codex-NAME`，失败后用 `provider connect NAME` 继续验证并安装启动器。没有外部模型目录时只声明指定模型，不声称已发现供应商全部模型。
 - 用户要求创建新后台时，用已安装的 `codexd-bridge daemon create`，先通过 `--help` 核对参数。明确 provider、模型和新的绝对 `home`；不覆盖现有 home，也不复制凭据或会话历史。非内建 provider 从用户指定的 `--template-home` 复用公开连接设置。
 - 新建后端默认禁用。`daemon start <backend>` 后，用 `connect <backend>` 做真实模型检查、安装本技能并注册 MCP；检查通过后启用派发。`models check <backend> --model <model> --effort <effort>` 可单独验证，临时会话须从目标 daemon 删除。

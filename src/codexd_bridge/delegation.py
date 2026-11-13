@@ -20,6 +20,24 @@ request_meta: ContextVar[dict | None] = ContextVar("bridge_request_meta", defaul
 MAX_STATE_BYTES = 16 * 1024 * 1024
 
 
+class OperatorGuard:
+    """Explicit human administration has no calling agent session.
+
+    Used only by the interactive terminal UI. MCP always uses DelegationGuard;
+    a tool argument cannot select this mode. Native fork ancestry remains in
+    the daemon and is imported when a fork later dispatches through MCP.
+    """
+
+    def caller(self):
+        return None
+
+    def check(self, caller, target=None):
+        pass
+
+    def record(self, caller, target, *, fork_from=None):
+        pass
+
+
 @dataclass(frozen=True)
 class SessionRef:
     home: Path

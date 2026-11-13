@@ -400,6 +400,222 @@ class ConnectProvider(ProvidersTestCase):
             self.connect(name="nope")
 
 
+class ProgressStages(ProvidersTestCase):
+    STAGES = ["configuration", "daemon", "verification", "integration", "launcher", "ready"]
+
+    def failed_stages(self, expected, **kw):
+        stages = []
+        with self.assertRaises((ProviderError, ProvisioningError)):
+            self.add(progress=stages.append, **kw)
+        self.assertEqual(stages, expected)
+
+    def test_add_reports_all_stages_in_order(self):
+        stages = []
+        result = self.add(progress=stages.append)
+        self.assertTrue(result["enabled"])
+        self.assertEqual(stages, self.STAGES)
+
+    def test_connect_reports_stages_without_configuration(self):
+        self.add()
+        stages = []
+        result = self.connect(progress=stages.append)
+        self.assertTrue(result["enabled"])
+        self.assertEqual(stages, self.STAGES[1:])
+
+    def test_progress_none_matches_omitted_behavior(self):
+        result = self.add(progress=None)
+        self.assertTrue(result["enabled"])
+        self.assertTrue(self.launcher().is_file())
+
+    def test_stages_precede_their_actual_operations(self):
+        events = []
+        real_create = providers.create_daemon
+        real_install = providers._install_launcher
+        real_enable = set_backend_enabled
+
+        def record(label, fn):
+            def wrapped(*a, **kw):
+                events.append(label)
+                return fn(*a, **kw)
+            return wrapped
+
+        self.patch(
+            "codexd_bridge.providers.create_daemon",
+            side_effect=record("create_daemon", real_create),
+        )
+        self.daemon_action.side_effect = record("daemon_status", self._daemon_action)
+        self.check_model.side_effect = record("check_model", lambda *a, **kw: {"available": True})
+        self.install_skill.side_effect = record(
+            "install_skill", lambda home, **kw: Path(home) / "skills" / "codexd-bridge"
+        )
+        self.register_bridge.side_effect = record(
+            "register_bridge", lambda *a, **kw: {"effective": True}
+        )
+        self.patch(
+            "codexd_bridge.providers._install_launcher",
+            side_effect=record("install_launcher", real_install),
+        )
+        self.patch(
+            "codexd_bridge.providers.set_backend_enabled",
+            side_effect=record("enable", real_enable),
+        )
+        self.add(progress=lambda stage: events.append("stage:" + stage))
+        self.assertEqual(
+            events,
+            [
+                "stage:configuration", "create_daemon",
+                "stage:daemon", "daemon_status",
+                "stage:verification", "check_model",
+                "stage:integration", "install_skill", "register_bridge",
+                "stage:launcher", "install_launcher", "enable",
+                "stage:ready",
+            ],
+        )
+
+    def test_validation_failure_reports_nothing(self):
+        self.failed_stages([], wire_api="grpc")
+
+    def test_create_failure_stops_after_configuration(self):
+        self.patch("codexd_bridge.providers.create_daemon", side_effect=ProvisioningError("boom"))
+        self.failed_stages(self.STAGES[:1])
+
+    def test_daemon_failure_stops_at_daemon(self):
+        self.daemon_state = "unreachable"
+        self.failed_stages(self.STAGES[:2])
+
+    def test_verification_failure_stops_at_verification(self):
+        self.check_model.side_effect = ProbeError("no marker reply")
+        self.failed_stages(self.STAGES[:3])
+
+    def test_skill_failure_stops_at_integration(self):
+        self.install_skill.side_effect = IntegrationError("skill conflict")
+        self.failed_stages(self.STAGES[:4])
+
+    def test_registration_failure_stops_at_integration(self):
+        self.register_bridge.side_effect = IntegrationError("write refused")
+        self.failed_stages(self.STAGES[:4])
+
+    def test_registration_not_effective_stops_at_integration(self):
+        self.register_bridge.return_value = {"effective": False, "warning": "overridden"}
+        self.failed_stages(self.STAGES[:4])
+
+    def test_launcher_install_failure_stops_at_launcher(self):
+        self.patch("codexd_bridge.providers._install_launcher", side_effect=OSError("disk full"))
+        self.failed_stages(self.STAGES[:5])
+
+    def test_enable_failure_stops_at_launcher(self):
+        self.patch(
+            "codexd_bridge.providers.set_backend_enabled",
+            side_effect=ProvisioningError("registry write failed"),
+        )
+        self.failed_stages(self.STAGES[:5])
+
+    def test_connect_failure_never_reports_ready(self):
+        self.add()
+        set_backend_enabled("demo", False, registry_path=self.registry)
+        self.launcher().unlink()
+        self.check_model.side_effect = ProbeError("down")
+        stages = []
+        with self.assertRaises(ProviderError):
+            self.connect(progress=stages.append)
+        self.assertEqual(stages, ["daemon", "verification"])
+
+    def test_retry_connect_reuses_home_without_recreating_it(self):
+        self.add()
+        set_backend_enabled("demo", False, registry_path=self.registry)
+        self.launcher().unlink()
+        config = self.homes / "demo" / "config.toml"
+        before = config.read_bytes()
+        inode = config.stat().st_ino
+        create = self.patch(
+            "codexd_bridge.providers.create_daemon",
+            side_effect=AssertionError("connect must not recreate the home"),
+        )
+        stages = []
+        result = self.connect(progress=stages.append)
+        self.assertTrue(result["enabled"])
+        self.assertEqual(stages, self.STAGES[1:])
+        create.assert_not_called()
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(config.stat().st_ino, inode)
+        self.assertEqual(result["home"], str(self.homes / "demo"))
+        self.assertEqual(len(self.read_registry()), 1)
+
+
+class RetryCommand(ProvidersTestCase):
+    def test_config_is_global_flag_before_provider_connect(self):
+        command = providers._retry_command("demo", self.registry, self.bin, self.executable)
+        tokens = shlex.split(command)
+        self.assertEqual(tokens[:2], ["codexd-bridge", "--config"])
+        self.assertEqual(tokens[2], str(self.registry))
+        self.assertEqual(tokens[3:6], ["provider", "connect", "demo"])
+
+    def test_quoting_round_trips_with_spaces(self):
+        registry = self.root / "reg dir;rm" / "bridge config.toml"
+        launcher_dir = self.root / "my bin"
+        executable = self.root / "opt dir" / "codexd-bridge"
+        command = providers._retry_command("demo", registry, launcher_dir, executable)
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "codexd-bridge", "--config", str(registry),
+                "provider", "connect", "demo",
+                "--launcher-dir", str(launcher_dir),
+                "--executable", str(executable),
+            ],
+        )
+
+    def test_default_paths_omit_optional_flags(self):
+        try:
+            default_exe = providers._resolve_executable(None)
+        except ProviderError:
+            self.skipTest("no default codexd-bridge executable on this machine")
+        registry = providers._resolve_config_path(None)[0].absolute()
+        launcher_dir = providers._expand_user(providers.DEFAULT_LAUNCHER_DIR, "launcher_dir")
+        command = providers._retry_command("demo", registry, launcher_dir, default_exe)
+        self.assertEqual(shlex.split(command), ["codexd-bridge", "provider", "connect", "demo"])
+
+    def test_connect_error_places_config_before_subcommand(self):
+        self.add()
+        self.check_model.side_effect = ProbeError("down")
+        with self.assertRaises(ProviderError) as ctx:
+            self.connect()
+        msg = str(ctx.exception)
+        self.assertLess(msg.index("--config"), msg.index("provider connect"))
+
+
+class ProviderErrorDetail(ProvidersTestCase):
+    def test_connect_failure_detail_is_cause_only(self):
+        self.add()
+        set_backend_enabled("demo", False, registry_path=self.registry)
+        self.launcher().unlink()
+        self.check_model.side_effect = ProbeError("no marker reply")
+        with self.assertRaises(ProviderError) as ctx:
+            self.connect()
+        error = ctx.exception
+        self.assertEqual(error.detail, "no marker reply")
+        self.assertNotIn("Retry with", error.detail)
+        self.assertNotIn("codexd-bridge", error.detail)
+        msg = str(error)
+        self.assertIn("connect failed; route state preserved", msg)
+        self.assertIn("Retry with: codexd-bridge", msg)
+        self.assertIn("Cause: no marker reply", msg)
+
+    def test_registration_detail_carries_warning_cause(self):
+        self.add()
+        self.register_bridge.return_value = {"effective": False, "warning": "overridden"}
+        with self.assertRaises(ProviderError) as ctx:
+            self.connect()
+        self.assertEqual(ctx.exception.detail, "MCP registration is not effective; overridden")
+
+    def test_detail_defaults_to_none(self):
+        self.assertIsNone(ProviderError("plain").detail)
+        self.add()
+        with self.assertRaises(ProviderError) as ctx:
+            self.connect(name="nope")
+        self.assertIsNone(ctx.exception.detail)
+
+
 class LauncherSafety(ProvidersTestCase):
     def test_paths_are_shell_quoted(self):
         text = providers._launcher_text(
