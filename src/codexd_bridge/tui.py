@@ -28,6 +28,7 @@ from prompt_toolkit.layout import (
     to_container,
 )
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import Button, Checkbox, Frame, Label, RadioList, TextArea
 
 from . import __version__
@@ -48,12 +49,12 @@ STAGES = {
 }
 STYLE = Style.from_dict(
     {
-        "": "bg:#000000 #ffffff",
+        "": "bg:#11151c #e5e9f0",
         "title": "bold",
         "header": "reverse bold",
         "frame.label": "bold",
         "focused": "reverse bold",
-        "button.focused": "bg:#000000 #ffffff reverse bold",
+        "button.focused": "bg:#11151c #e5e9f0 reverse bold",
         "radio-selected": "reverse",
         "error": "ansired",
         "card.focused": "reverse",
@@ -482,24 +483,47 @@ class BridgeUI:
         return DynamicContainer(self.overview_content)
 
     def overview_content(self):
+        width = self.content_width() - 2
+
+        def cell(value, columns):
+            text = clean(value).replace("\n", " ").replace("\t", " ")
+            if get_cwidth(text) > columns - 2:
+                while text and get_cwidth(text) > columns - 3:
+                    text = text[:-1]
+                text += "…"
+            padding = columns - get_cwidth(text)
+            return " " * (padding // 2) + text + " " * (padding - padding // 2)
+
         if self.app.output.get_size().rows < 26:
-            summary = (f"{len(self.routes)} Codex configured / "
-                       f"{sum(b.enabled for b in self.routes.values())} bridge enabled"
+            columns = (width - 1) // 2
+            summary = (cell(f"Configured: {len(self.routes)}", columns) + "│"
+                       + cell(f"Bridge enabled: {sum(b.enabled for b in self.routes.values())}",
+                              width - columns - 1)
                        if self.routes else "No Codex added. Choose Manage backends.")
             return Frame(Label(summary, align=WindowAlign.CENTER), title="Your Codex", height=3)
         if not self.routes:
             return Frame(Label("No Codex added yet.\nChoose Manage backends to get started.",
                                align=WindowAlign.CENTER),
                          title="Your Codex", height=4)
-        lines = ["Name / Provider / Bridge"]
-        lines += [clean(f"{b.name} / {b.model_provider} / "
-                        + ("enabled" if b.enabled else "needs verification"))
-                  for b in list(self.routes.values())[:5]]
+        columns = [(width - 2) // 3] * 2
+        columns.append(width - 2 - sum(columns))
+
+        def row(values):
+            return "│".join(cell(value, size) for value, size in zip(values, columns))
+
+        lines = [row((b.name, b.model_provider, "Enabled" if b.enabled else "Disabled"))
+                 for b in list(self.routes.values())[:5]]
+        content = [
+            Label(row(("Name", "Provider", "Bridge status")), style="class:title"),
+            Label("┼".join("─" * size for size in columns)),
+            Label("\n".join(lines)),
+        ]
         if len(self.routes) > 5:
-            lines.append(f"+ {len(self.routes) - 5} more; choose an action to see all.")
-        lines.append("Daemon status checks running services.")
-        return Frame(Label("\n".join(lines), align=WindowAlign.CENTER),
-                     title="Your Codex", height=len(lines) + 2)
+            content += [Label("─" * width),
+                        Label(f"{len(self.routes) - 5} more · choose an action to view all",
+                              align=WindowAlign.CENTER)]
+        return Frame(HSplit(content), title="Your Codex",
+                     height=len(lines) + 4 + (2 if len(self.routes) > 5 else 0))
 
     def home(self):
         self.menu = self.home

@@ -79,7 +79,7 @@ The home screen has two cards:
 - **Use backend:** open Codex, browse models and manage sessions.
 - **Manage backends:** add configurations, connect the bridge, manage services and uninstall.
 
-The overview lists your configured Codex environments and their bridge status. When an operation needs a target,
+The character table shows each configured Codex name, provider and bridge status. When an operation needs a target,
 one configured environment is used directly; with several, choose one and press `Enter`.
 **Daemon status** checks whether its Codex service is running. Closing the manager leaves running services active.
 
