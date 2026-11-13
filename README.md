@@ -7,7 +7,7 @@ A keyboard TUI guides setup and everyday operations.
 
 ![Character-based TUI home with Use backend and Manage backends cards](docs/images/tui-home.png)
 
-*The running home screen with configured Codex environments. The focused card expands slightly and inverts its colors.*
+*Running home screen: centered character cards expand slightly and invert their colors when focused.*
 
 ## Prerequisites
 

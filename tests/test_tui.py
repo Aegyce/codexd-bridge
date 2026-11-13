@@ -425,6 +425,40 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.05)
         self.assertRegex(stream.getvalue(), r"\x1b\[[0-9;]*7m[^\x1b]*Manage backends")
 
+    async def test_cards_and_status_content_stay_centered_on_resize(self):
+        for columns, rows in ((60, 18), (100, 30), (140, 40)):
+            with self.subTest(columns=columns, rows=rows):
+                self.output.size = Size(rows=rows, columns=columns)
+                self.ui.home()
+                await asyncio.sleep(.05)
+                positions = []
+                for _ in range(2):
+                    lines = self.rendered().splitlines()
+                    self.assertNotIn("Window too small", "\n".join(lines))
+                    labels = []
+                    for label in ("Use backend", "Manage backends"):
+                        y = max(i for i, line in enumerate(lines) if label in line)
+                        labels.append((y, lines[y].index(label) + (len(label) - 1) / 2))
+                    self.assertEqual(labels[0][0], labels[1][0])
+                    self.assertAlmostEqual(sum(x for _, x in labels) / 2, (columns - 1) / 2, delta=1)
+                    status_bottom = next(i for i, line in enumerate(lines) if "└" in line)
+                    card_top = next(i for i in range(status_bottom + 1, rows) if "┌" in lines[i])
+                    card_bottom = max(i for i, line in enumerate(lines) if "└" in line)
+                    self.assertAlmostEqual((card_top + card_bottom) / 2,
+                                           (status_bottom + 2 + rows - 3) / 2, delta=1)
+                    positions.append(labels)
+                    self.pipe.send_text("\t")
+                    await asyncio.sleep(.05)
+                self.assertEqual(positions[0], positions[1])
+                self.ui.text("Service status", "State: ready")
+                await asyncio.sleep(.05)
+                lines = self.rendered().splitlines()
+                top = next(i for i, line in enumerate(lines) if "┌" in line)
+                bottom = max(i for i, line in enumerate(lines) if "└" in line)
+                self.assertAlmostEqual((top + bottom) / 2, rows / 2, delta=1)
+                self.assertAlmostEqual((lines[top].index("┌") + lines[top].rindex("┐")) / 2,
+                                       (columns - 1) / 2, delta=1)
+
     async def test_create_daemon_configuration_and_switch_registry_from_tui(self):
         self.ui.more_tools()
         with patch("codexd_bridge.provisioning.create_daemon",

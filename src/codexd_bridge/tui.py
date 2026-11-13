@@ -17,11 +17,15 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import (
     Dimension,
     DynamicContainer,
+    HorizontalAlign,
     HSplit,
     Layout,
     ScrollablePane,
+    VerticalAlign,
     VSplit,
     Window,
+    WindowAlign,
+    to_container,
 )
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Checkbox, Frame, Label, RadioList, TextArea
@@ -44,12 +48,15 @@ STAGES = {
 }
 STYLE = Style.from_dict(
     {
+        "": "bg:#000000 #ffffff",
         "title": "bold",
+        "header": "reverse bold",
+        "frame.label": "bold",
+        "focused": "reverse bold",
         "button.focused": "bg:#000000 #ffffff reverse bold",
         "radio-selected": "reverse",
         "error": "ansired",
-        "home-card": "bg:#000000 #ffffff",
-        "home-card.focused": "bg:#000000 #ffffff reverse",
+        "card.focused": "reverse",
     }
 )
 
@@ -129,33 +136,33 @@ class BridgeUI:
         def new_provider(_event):
             self.new_provider()
 
-        root = HSplit(
+        page = HSplit(
             [
-                Label("  CODEXD BRIDGE " + __version__, style="class:title"),
-                Label(lambda: "  " + self.title, style="class:subtitle"),
+                Label("CODEXD BRIDGE " + __version__, style="class:header", align=WindowAlign.CENTER),
+                Label(lambda: self.title, style="class:title", align=WindowAlign.CENTER),
                 Window(height=1),
                 VSplit([Window(width=3), DynamicContainer(self.visible_body), Window(width=3)]),
-                Label(lambda: "  " + self.notice, style="class:error"),
+                Label(lambda: self.notice, style="class:error", align=WindowAlign.CENTER),
                 Label(
                     lambda: (
-                        "  "
-                        + (
-                            "Finishing the current operation..."
-                            if self.close_when_done
-                            else (
-                                "Tab switch  Enter open  Ctrl+Q exit"
-                                if self.screen == "home"
-                                else "Tab area  Up/Down select  Enter run  Esc back  Ctrl+Q exit"
-                                if self.action_groups
-                                else "Ctrl+Q exit  Tab move  Enter choose  Ctrl+S submit  Esc back"
-                            )
+                        "Finishing the current operation..."
+                        if self.close_when_done
+                        else (
+                            "Tab switch  Enter open  Ctrl+Q exit"
+                            if self.screen == "home"
+                            else "Tab area  Up/Down select  Enter run  Esc back  Ctrl+Q exit"
+                            if self.action_groups
+                            else "Ctrl+Q exit  Tab move  Enter choose  Ctrl+S submit  Esc back"
                         )
                     ),
                     style="class:footer",
+                    align=WindowAlign.CENTER,
                     dont_extend_height=True,
                 ),
-            ]
+            ],
+            width=lambda: min(100, self.app.output.get_size().columns),
         )
+        root = VSplit([page], align=HorizontalAlign.CENTER)
         self.app = Application(
             layout=Layout(root),
             key_bindings=keys,
@@ -177,6 +184,9 @@ class BridgeUI:
             )
         return self.body
 
+    def content_width(self):
+        return min(100, self.app.output.get_size().columns) - 6
+
     def quit(self):
         if self.busy:
             self.close_when_done = True
@@ -191,7 +201,8 @@ class BridgeUI:
         self.submit = None
         self.back = back or self.menu
         self.buttons = {
-            label: Button(label, handler=lambda fn=handler: self.invoke(fn), width=23)
+            label: Button(label, handler=lambda fn=handler: self.invoke(fn), width=23,
+                          left_symbol="", right_symbol="")
             for label, handler in actions
         }
         buttons = list(self.buttons.values())
@@ -199,10 +210,10 @@ class BridgeUI:
         self.group_focus = []
 
         def action_rows():
-            count = max(1, min(3, (self.app.output.get_size().columns - 4) // 25))
+            count = max(1, min(3, (self.content_width() - 2) // 25))
             return HSplit(
                 [
-                    VSplit([*buttons[i : i + count], Window()], padding=2)
+                    VSplit(buttons[i : i + count], padding=2, align=HorizontalAlign.CENTER)
                     for i in range(0, len(buttons), count)
                 ]
             )
@@ -211,61 +222,78 @@ class BridgeUI:
             groups = [[self.buttons[label] for label in labels] for _, labels in action_groups]
             self.action_groups = groups
             self.group_focus = [group[0] for group in self.action_groups]
+            def column_width():
+                count = max(1, min(3, len(groups), (self.content_width() + 2) // 27))
+                return min(32, (self.content_width() - 2 * (count - 1)) // count)
+
             if screen == "home":
-                frames = [self.home_card(groups[0][0], "Open Codex\nSessions and models"),
-                          self.home_card(groups[1][0], "Add/connect providers\nStart/stop services")]
+                frames = [self.home_card(groups[0][0], "Open Codex\nSessions and models", column_width),
+                          self.home_card(groups[1][0], "Add/connect providers\nStart/stop services", column_width)]
             else:
                 frames = [
-                    Frame(HSplit(group), title=title, height=len(group) + 2)
+                    Frame(HSplit(group, width=Dimension(min=23)), title=title,
+                          height=len(group) + 2, width=column_width)
                     for (title, _), group in zip(action_groups, groups)
                 ]
 
             def grouped_rows():
-                count = max(1, min(3, (self.app.output.get_size().columns - 4) // 27))
+                count = max(1, min(3, (self.content_width() + 2) // 27))
                 return HSplit(
-                    [VSplit(frames[i:i + count], padding=2)
+                    [VSplit(frames[i:i + count], padding=2, align=HorizontalAlign.CENTER)
                      for i in range(0, len(frames), count)],
                     padding=1,
                 )
 
-            self.body = ScrollablePane(
-                HSplit([content, Window(height=1), DynamicContainer(grouped_rows), Window()]),
-                show_scrollbar=False,
-            )
+            if screen == "home":
+                self.body = HSplit([
+                    content, Window(height=1),
+                    HSplit([DynamicContainer(grouped_rows)], align=VerticalAlign.CENTER),
+                ])
+            else:
+                self.body = ScrollablePane(
+                    HSplit([content, Window(height=1), DynamicContainer(grouped_rows)],
+                           align=VerticalAlign.CENTER), show_scrollbar=False,
+                )
         else:
+            def content_height():
+                height = to_container(content).preferred_height(self.content_width() - 2, 10000).preferred + 2
+                return Dimension(min=3, preferred=max(3, height), max=max(3, height))
+
             self.body = HSplit(
                 [
-                    HSplit([content], height=Dimension(min=1, weight=1)),
+                    Frame(content, title="Settings" if screen == "form" else "Details",
+                          height=content_height),
                     Window(height=1),
-                    DynamicContainer(action_rows),
+                    Frame(DynamicContainer(action_rows), title="Actions"),
                 ],
-                padding=0,
+                align=VerticalAlign.CENTER,
             )
         if focus is not None or buttons:
             self.app.layout.focus(focus if focus is not None else buttons[0])
         self.app.layout.update_parents_relations()
         self.app.invalidate()
 
-    def home_card(self, button, description):
+    def home_card(self, button, description, width):
         def focused():
             return self.app.layout.has_focus(button)
 
-        button.left_symbol = button.right_symbol = ""
         button.width = 21
+        button.window.width = 21
         button.window.style = "class:title"
         # Keep each card's slot fixed; expand its border by one character on
         # every side when focused, without moving the neighbouring card.
         frame = Frame(HSplit([
             Window(height=lambda: 2 if focused() else 1), button,
-            Label(description), Window(height=lambda: 2 if focused() else 1),
-        ]), height=lambda: 9 if focused() else 7)
+            Label(description, align=WindowAlign.CENTER), Window(height=lambda: 2 if focused() else 1),
+        ], width=Dimension(min=21)), height=lambda: 9 if focused() else 7,
+            width=lambda: width() - (0 if focused() else 2))
         return HSplit([
             Window(height=lambda: 0 if focused() else 1),
             VSplit([Window(width=lambda: 0 if focused() else 1), frame,
                     Window(width=lambda: 0 if focused() else 1)]),
             Window(height=lambda: 0 if focused() else 1),
-        ], height=9,
-            style=lambda: "class:home-card.focused" if focused() else "class:home-card")
+        ], height=9, width=width,
+            style=lambda: "class:card.focused" if focused() else "")
 
     def invoke(self, action):
         """Keep recoverable local errors inside the manager, including stale registry entries."""
@@ -301,7 +329,7 @@ class BridgeUI:
             def title_text(spec=spec, widget=widget):
                 return [
                     (
-                        "class:title" if self.app.layout.has_focus(widget) else "class:subtitle",
+                        "class:focused" if self.app.layout.has_focus(widget) else "class:title",
                         spec.label,
                     )
                 ]
@@ -454,13 +482,14 @@ class BridgeUI:
         return DynamicContainer(self.overview_content)
 
     def overview_content(self):
-        if self.app.output.get_size().rows < 24:
+        if self.app.output.get_size().rows < 26:
             summary = (f"{len(self.routes)} Codex configured / "
                        f"{sum(b.enabled for b in self.routes.values())} bridge enabled"
                        if self.routes else "No Codex added. Choose Manage backends.")
-            return Frame(Label(summary), title="Your Codex", height=3)
+            return Frame(Label(summary, align=WindowAlign.CENTER), title="Your Codex", height=3)
         if not self.routes:
-            return Frame(Label("No Codex added yet.\nChoose Manage backends to get started."),
+            return Frame(Label("No Codex added yet.\nChoose Manage backends to get started.",
+                               align=WindowAlign.CENTER),
                          title="Your Codex", height=4)
         lines = ["Name / Provider / Bridge"]
         lines += [clean(f"{b.name} / {b.model_provider} / "
@@ -469,7 +498,8 @@ class BridgeUI:
         if len(self.routes) > 5:
             lines.append(f"+ {len(self.routes) - 5} more; choose an action to see all.")
         lines.append("Daemon status checks running services.")
-        return Frame(Label("\n".join(lines)), title="Your Codex", height=len(lines) + 2)
+        return Frame(Label("\n".join(lines), align=WindowAlign.CENTER),
+                     title="Your Codex", height=len(lines) + 2)
 
     def home(self):
         self.menu = self.home
