@@ -1,8 +1,8 @@
 """Install the bundled skill and register the bridge with a running daemon.
 
-Only two artifacts are managed: the ``skills/codexd-bridge`` directory inside a
-Codex home, and the ``mcp_servers.codexd-bridge`` entry of a running daemon's
-configuration. Other skills, MCP servers, and approval policies are never
+The bridge skill and its canonical MCP entry are managed inside a Codex home.
+Recognized compatibility entries receive the same caller identity and version.
+Other skills, MCP servers, and approval policies are never
 modified; session-write approvals change only when the caller explicitly opts
 in. Configuration is read through the daemon's own ``config/read`` method, only
 the owned service block is inspected, and no configuration content or credential
@@ -39,6 +39,24 @@ def _field_edits(existing: dict, managed: dict, prefix: str = SERVER_KEY_PATH) -
         elif existing.get(key) != value:
             edits.append({"keyPath": path, "value": value, "mergeStrategy": "replace"})
     return edits
+
+
+def _compatibility_entries(servers: dict, executable: Path, registry: Path):
+    """Recognize only legacy entries using this installation and registry."""
+    for name in ("codex-bridge", "codex-qwen"):
+        entry = servers.get(name, {})
+        if not isinstance(entry, dict) or "url" in entry:
+            continue
+        args = entry.get("args", [])
+        canonical = (entry.get("command") == str(executable)
+                     and args in (["--config", str(registry)],
+                                  ["--config", str(registry), "serve"]))
+        compat = (entry.get("command") == str(executable.parent / "python")
+                  and isinstance(args, list) and len(args) == 8
+                  and args[:4] == ["-m", "codexd_bridge.compat", "--config", str(registry)]
+                  and args[4] == "--backend" and args[6] == "--cwd")
+        if canonical or compat:
+            yield name, entry
 
 
 class IntegrationError(BridgeError):
@@ -167,7 +185,10 @@ def register_bridge(
         "startup_timeout_sec": 20,
         "tool_timeout_sec": 60,
         # A changed server identity lets the daemon replace old MCP workers on upgrade.
-        "env": {"CODEXD_BRIDGE_VERSION": __version__},
+        "env": {
+            "CODEXD_BRIDGE_VERSION": __version__,
+            "CODEXD_BRIDGE_CALLER_HOME": str(home.resolve()),
+        },
     }
     with client_factory(home) as client:
         read = client.call("config/read", {"includeLayers": False})
@@ -187,6 +208,10 @@ def register_bridge(
         if allow_session_writes:
             managed["tools"] = {name: {"approval_mode": "approve"} for name in SESSION_WRITE_TOOLS}
         edits = _field_edits(existing, managed)
+        aliases = []
+        for name, entry in _compatibility_entries(servers, executable, registry_path):
+            edits.extend(_field_edits(entry, {"env": managed["env"]}, f"mcp_servers.{name}"))
+            aliases.append(name)
         changed = bool(edits)
         write_status = None
         version = None
@@ -227,5 +252,6 @@ def register_bridge(
         if overridden
         else (None if ready else "MCP tool discovery did not confirm the installed bridge version"),
         "reloaded": True,
+        "compatibility_entries": aliases,
         "session_write_approval_requested": bool(allow_session_writes),
     }

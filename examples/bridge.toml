@@ -1,4 +1,7 @@
 # Aliases identify routes, while model_provider must match the target daemon.
+[delegation]
+max_depth = 8
+
 [backends.openai]
 home = "~/.codex"
 model_provider = "openai"

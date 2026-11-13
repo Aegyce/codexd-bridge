@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from codexd_bridge.config import Backend
 from codexd_bridge.sessions import Bridge
@@ -92,7 +92,7 @@ class SessionsTests(unittest.TestCase):
         self.route = patch("codexd_bridge.sessions.load_backends", return_value=self.targets)
         self.route.start()
         self.addCleanup(self.route.stop)
-        self.bridge = Bridge(connector=self.servers.__getitem__)
+        self.bridge = Bridge(connector=self.servers.__getitem__, guard=Mock())
         self.server = self.servers[self.targets["qwen"].home]
 
     def create(self, **kwargs):

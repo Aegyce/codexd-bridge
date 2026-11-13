@@ -353,7 +353,7 @@ def _load_registry(registry: Path) -> dict[str, dict]:
     (including 'enabled', or its absence in old manual configs) never change.
     """
     if not os.path.lexists(registry):
-        return {}
+        return {"backends": {}}
     if registry.is_symlink() or not registry.is_file():
         raise ProvisioningError("registry path must be a regular file (symlinks are refused)")
     # Strict validation: an invalid registry is refused, never silently rewritten.
@@ -365,7 +365,7 @@ def _load_registry(registry: Path) -> dict[str, dict]:
         raise ProvisioningError("registry cannot be read") from None
     except tomllib.TOMLDecodeError:
         raise ProvisioningError("registry is not valid TOML") from None
-    return data["backends"]
+    return data
 
 
 def _backend_from_entry(name: str, entry: dict) -> Backend:
@@ -381,21 +381,23 @@ def _backend_from_entry(name: str, entry: dict) -> Backend:
 
 def _register(registry: Path, name: str, entry: dict) -> None:
     with _registry_lock(registry):
-        existing = _load_registry(registry)
+        data = _load_registry(registry)
+        existing = data["backends"]
         if name in existing:
             raise ProvisioningError(
                 f"backend {name!r} already exists in the registry; refusing to overwrite"
             )
         merged = {**existing, name: entry}
-        _atomic_write(registry, _toml_dumps({"backends": merged}))
+        _atomic_write(registry, _toml_dumps({**data, "backends": merged}))
 
 
 def _rollback_home(home: Path) -> None:
     """Best-effort removal of only what this call created inside a fresh home."""
-    try:
-        (home / "config.toml").unlink(missing_ok=True)
-    except OSError:
-        pass
+    for name in ("config.toml", "model-catalog.json"):
+        try:
+            (home / name).unlink(missing_ok=True)
+        except OSError:
+            pass
     try:
         home.rmdir()
     except OSError:
@@ -421,6 +423,7 @@ def create_daemon(
     registry_path: Path | None = None,
     template_home: Path | None = None,
     effort: str | None = None,
+    catalog_text: str | None = None,
 ) -> Backend:
     """Create a fresh isolated daemon home and register it disabled; never start it.
 
@@ -499,8 +502,20 @@ def create_daemon(
         if registry_resolved == (template / "config.toml").resolve():
             raise ProvisioningError("registry path must not point at the template's config.toml")
     provider_table, catalog_path = _template_settings(template, provider)
+    if catalog_text is not None:
+        if not isinstance(catalog_text, str):
+            raise ProvisioningError("catalog_text must be JSON text")
+        try:
+            catalog = json.loads(catalog_text)
+        except (ValueError, TypeError):
+            raise ProvisioningError("catalog_text must be a JSON model catalog") from None
+        if not isinstance(catalog, dict) or not isinstance(catalog.get("models"), list):
+            raise ProvisioningError("catalog_text must contain a models array")
+        if catalog_path is not None:
+            raise ProvisioningError("use either catalog_text or a template catalog reference")
+        catalog_path = str(home_path / "model-catalog.json")
 
-    existing = _load_registry(registry)
+    existing = _load_registry(registry)["backends"]
     if name in existing:
         raise ProvisioningError(
             f"backend {name!r} already exists in the registry; refusing to overwrite"
@@ -551,6 +566,8 @@ def create_daemon(
     try:
         os.chmod(home_path, 0o700)
         _write_private_config(home_path / "config.toml", config_text)
+        if catalog_text is not None:
+            _write_private_config(home_path / "model-catalog.json", catalog_text)
         _register(registry, name, entry)
     except OSError as error:
         _rollback_home(home_path)
@@ -592,7 +609,8 @@ def set_backend_enabled(
         raise ProvisioningError(f"backend {name!r} not found; registry does not exist")
     try:
         with _registry_lock(registry):
-            existing = _load_registry(registry)
+            data = _load_registry(registry)
+            existing = data["backends"]
             if name not in existing:
                 raise ProvisioningError(f"backend {name!r} not found in the registry")
             entry = dict(existing[name])
@@ -600,7 +618,7 @@ def set_backend_enabled(
                 return _backend_from_entry(name, entry)
             entry["enabled"] = enabled
             merged = {**existing, name: entry}
-            _atomic_write(registry, _toml_dumps({"backends": merged}))
+            _atomic_write(registry, _toml_dumps({**data, "backends": merged}))
             return _backend_from_entry(name, entry)
     except OSError as error:
         raise ProvisioningError(f"cannot update registry ({error.strerror})") from None

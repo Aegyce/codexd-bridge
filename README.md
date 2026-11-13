@@ -3,12 +3,12 @@
 [![English (current)](https://img.shields.io/badge/English-8C2F39?style=flat-square)](README.md) [![简体中文](https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-555555?style=flat-square)](README.zh-CN.md)
 
 Coordinate independent Codex App Server sessions across providers through MCP.
-Discover available models, delegate tasks, and continue conversations on another provider.
+Create provider launchers, discover models, and delegate tasks across independent daemons.
 
 ## Prerequisites
 
 - Linux with Python 3.11+ and the `codex` CLI (compatible with Codex 0.167.2).
-- An existing Codex provider home: its `config.toml` declares `model_provider`, and credentials are already configured there.
+- Provider access through an API key environment variable or an existing configured Codex home.
 
 ## Install
 
@@ -21,7 +21,31 @@ python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-## Quick start
+## Create a provider
+
+Export the API key in your shell, then supply the provider's endpoint, model ID,
+and documented context limit (the values below are examples):
+
+```bash
+codexd-bridge provider add demo \
+  --base-url https://provider.example/v1 --env-key DEMO_API_KEY \
+  --model MODEL_ID --context-window 131072
+codex-demo
+```
+
+This creates an independent home, verifies real inference, connects MCP, and
+installs `codex-demo` in `~/.local/bin` (add that directory to `PATH`). Only the
+environment variable name is saved. Existing homes and launchers are preserved.
+Use `--wire-api chat` for Chat Completions, `--effort` for a supported reasoning
+level, or `--model-catalog /absolute/catalog.json` for an existing native catalog.
+Without a catalog, only the declared model is listed; automatic compaction is
+set to 80% of its context limit.
+
+If setup fails after creating the home, fix the reported issue and run
+`codexd-bridge provider connect demo` to verify and install its launcher.
+`codex-demo server start|status|stop` controls only that provider's daemon.
+
+## Connect an existing provider
 
 1. Create `~/.config/codexd-bridge/config.toml` (see the [example](examples/bridge.toml)):
 
@@ -58,6 +82,11 @@ source .venv/bin/activate
    > review /absolute/path/to/project. Read its response when the task finishes.
 
 Use `codexd-bridge --help` for more commands, including creating a new daemon home.
+
+Bridge calls cannot dispatch back to the calling session or its recorded
+ancestors. Delegation is limited to eight levels by default. After upgrading,
+run `connect NAME --update-skill` on each backend to refresh its MCP tools;
+older bridge sessions without recorded ancestry need fresh task sessions.
 
 ## License
 

@@ -163,10 +163,11 @@ def load_backends(path: Path | None = None) -> dict[str, Backend]:
     """
     config_path, source = _resolve_config_path(path)
     data = _read_config(config_path, source)
-    unknown = sorted(set(data) - {"backends"})
+    unknown = sorted(set(data) - {"backends", "delegation"})
     if unknown:
         listed = ", ".join(repr(key) for key in unknown)
-        raise ConfigError(f"unknown top-level field(s) {listed}; only 'backends' is supported")
+        raise ConfigError(f"unknown top-level field(s) {listed}; use 'backends' or 'delegation'")
+    delegation_depth(data)
     if "backends" not in data:
         raise ConfigError("missing required top-level field 'backends'")
     backends = data["backends"]
@@ -175,3 +176,13 @@ def load_backends(path: Path | None = None) -> dict[str, Backend]:
     if not backends:
         raise ConfigError("top-level field 'backends' must define at least one backend")
     return {name: _parse_backend(name, entry) for name, entry in backends.items()}
+
+
+def delegation_depth(data: dict) -> int:
+    policy = data.get("delegation", {})
+    if not isinstance(policy, dict) or set(policy) - {"max_depth"}:
+        raise ConfigError("delegation must be a table containing only max_depth")
+    value = policy.get("max_depth", 8)
+    if type(value) is not int or not 1 <= value <= 64:
+        raise ConfigError("delegation.max_depth must be an integer from 1 to 64")
+    return value

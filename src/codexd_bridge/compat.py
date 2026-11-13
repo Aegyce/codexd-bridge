@@ -6,7 +6,8 @@ from pathlib import Path
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
-from .server import public_errors
+from . import __version__
+from .server import public_errors, with_caller_context
 from .sessions import Bridge
 
 
@@ -14,6 +15,7 @@ def create_server(backend: str, cwd: str, config_path: Path | None = None) -> MC
     bridge = Bridge(config_path)
     server = MCPServer(
         "codexd-bridge-compat",
+        version=__version__,
         instructions=(
             "Compatibility entry point routed to one configured backend. "
             "Prefer codexd-bridge for new cross-provider coordination. "
@@ -42,6 +44,7 @@ def create_server(backend: str, cwd: str, config_path: Path | None = None) -> MC
 
     @server.tool()
     @public_errors
+    @with_caller_context
     def create_session(
         prompt: str,
         title: str,
@@ -54,18 +57,21 @@ def create_server(backend: str, cwd: str, config_path: Path | None = None) -> MC
 
     @server.tool()
     @public_errors
+    @with_caller_context
     def send_message(thread_id: str, prompt: str) -> dict:
         """Continue an idle session on the fixed backend."""
         return bridge.send_message(backend, thread_id, prompt)
 
     @server.tool()
     @public_errors
+    @with_caller_context
     def steer_session(thread_id: str, expected_turn_id: str, prompt: str) -> dict:
         """Add instructions to a specific active turn."""
         return bridge.steer_session(backend, thread_id, expected_turn_id, prompt)
 
     @server.tool()
     @public_errors
+    @with_caller_context
     def fork_session(thread_id: str, prompt: str, title: str) -> dict:
         """Fork a session without changing providers."""
         return bridge.fork_session(backend, thread_id, prompt, title)

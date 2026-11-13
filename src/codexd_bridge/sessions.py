@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .config import Backend, ConfigError, load_backends
+from .delegation import DelegationGuard, SessionRef
 from .transport import AppServer, BridgeError
 
 
@@ -134,9 +135,13 @@ def text_messages(items: list[dict], budget: int) -> tuple[list[dict], int]:
 
 
 class Bridge:
-    def __init__(self, config_path: Path | None = None, connector: Callable = AppServer):
+    def __init__(
+        self, config_path: Path | None = None, connector: Callable = AppServer,
+        *, guard: DelegationGuard | None = None,
+    ):
         self.config_path = config_path
         self.connector = connector
+        self.guard = guard if guard is not None else DelegationGuard(config_path, connector=connector)
 
     def backend(self, name: str, *, require_enabled: bool = False) -> Backend:
         backends = load_backends(self.config_path)
@@ -447,6 +452,8 @@ class Bridge:
         if sandbox not in ("read-only", "workspace-write"):
             raise ValueError("sandbox must be read-only or workspace-write")
         target = self.backend(backend, require_enabled=True)
+        caller = self.guard.caller()
+        self.guard.check(caller)
         chosen = selection(
             model if model is not None else target.default_model,
             effort if effort is not None else target.default_effort,
@@ -466,7 +473,25 @@ class Bridge:
         with self.connector(target.home) as client:
             validate_selection(client, chosen)
             response = self.started(target, client.call("thread/start", params), chosen)
+            self._record_created(client, caller, target, response)
             return self.start_turn(client, target, response, inputs, title)
+
+    def _record_created(
+        self, client, caller: SessionRef, target: Backend, response: dict,
+        *, fork_from: SessionRef | None = None,
+    ) -> None:
+        thread_id = response["thread"]["id"]
+        try:
+            self.guard.record(caller, SessionRef(target.home, thread_id), fork_from=fork_from)
+        except BridgeError as error:
+            try:
+                client.call("thread/delete", {"threadId": thread_id})
+            except BridgeError as cleanup:
+                raise BridgeError(
+                    f"Session {thread_id} was not started; delegation recording failed and "
+                    f"cleanup failed. Inspect this session. {cleanup}"
+                ) from error
+            raise
 
     def send_message(
         self,
@@ -480,12 +505,14 @@ class Bridge:
         inputs = prompt_input(prompt)
         chosen = selection(model, effort)
         target = self.backend(backend, require_enabled=True)
+        caller = self.guard.caller()
         with self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
             require_idle(thread)
             chosen = self.inherited_selection(thread, chosen)
             validate_selection(client, chosen)
             params = self.resume_params(target, thread_id, chosen)
+            self.guard.record(caller, SessionRef(target.home, thread_id))
             response = self.started(target, client.call("thread/resume", params), chosen)
             require_idle(response["thread"])
             return self.start_turn(client, target, response, inputs)
@@ -529,6 +556,9 @@ class Bridge:
         nonempty(title, "title", 256)
         chosen = selection(model, effort)
         target = self.backend(backend, require_enabled=True)
+        caller = self.guard.caller()
+        source = SessionRef(target.home, thread_id)
+        self.guard.check(caller, source)
         with self.connector(target.home) as client:
             thread = metadata(client, target, thread_id)
             chosen = self.inherited_selection(thread, chosen)
@@ -538,6 +568,7 @@ class Bridge:
                 client.call("thread/fork", self.resume_params(target, thread_id, chosen)),
                 chosen,
             )
+            self._record_created(client, caller, target, response, fork_from=source)
             return self.start_turn(client, target, response, inputs, title)
 
     def steer_session(
@@ -547,8 +578,10 @@ class Bridge:
         inputs = prompt_input(prompt)
         nonempty(expected_turn_id, "expected_turn_id")
         target = self.backend(backend, require_enabled=True)
+        caller = self.guard.caller()
         with self.connector(target.home) as client:
             metadata(client, target, thread_id)
+            self.guard.record(caller, SessionRef(target.home, thread_id))
             result = client.call(
                 "turn/steer",
                 {"threadId": thread_id, "expectedTurnId": expected_turn_id, "input": inputs},

@@ -1,13 +1,16 @@
 """Expose session operations as local MCP tools."""
 
 from functools import wraps
+from inspect import Parameter, signature
 from pathlib import Path
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from . import __version__
+from .delegation import request_meta
 from .sessions import Bridge
 from .transport import BridgeError
 
@@ -22,6 +25,27 @@ def public_errors(function):
         except (BridgeError, ValueError) as error:
             raise ToolError(str(error)) from error
 
+    return invoke
+
+
+def with_caller_context(function):
+    """Inject MCP metadata without exposing identity fields in the tool schema."""
+    @wraps(function)
+    def invoke(*args, ctx: Context | None = None, **kwargs):
+        if ctx is None:
+            raise BridgeError("MCP caller context is required for session writes")
+        token = request_meta.set(dict(ctx.request_context.meta or {}))
+        try:
+            return function(*args, **kwargs)
+        finally:
+            request_meta.reset(token)
+
+    original = signature(function)
+    invoke.__signature__ = original.replace(parameters=[
+        *original.parameters.values(),
+        Parameter("ctx", Parameter.KEYWORD_ONLY, annotation=Context),
+    ])
+    invoke.__annotations__ = {**function.__annotations__, "ctx": Context}
     return invoke
 
 
@@ -61,6 +85,7 @@ def create_server(config_path: Path | None = None) -> MCPServer:
             "read_session",
             "read_messages",
         )
+        handler = method if read_only else with_caller_context(method)
         server.tool(
             description=method.__doc__,
             annotations=ToolAnnotations(
@@ -69,7 +94,7 @@ def create_server(config_path: Path | None = None) -> MCPServer:
                 idempotentHint=read_only,
                 openWorldHint=not read_only,
             ),
-        )(public_errors(method))
+        )(public_errors(handler))
     return server
 
 

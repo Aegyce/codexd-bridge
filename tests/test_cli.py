@@ -80,6 +80,37 @@ class CliTests(unittest.TestCase):
     def connect_error(self, *extra):
         return self.run_cli_error("connect", "demo", "--executable", str(self.executable), *extra)
 
+    def test_provider_add_passes_connection_settings_and_registry(self):
+        with patch("codexd_bridge.providers.add_provider", return_value={"enabled": True}) as add:
+            out, _ = self.run_cli(
+                "provider", "add", "demo", "--base-url", "https://provider.example/v1",
+                "--env-key", "DEMO_API_KEY", "--model", "model", "--context-window", "131072",
+                "--effort", "high", "--wire-api", "chat", "--home", str(self.home / "new"),
+            )
+        self.assertTrue(json.loads(out)["enabled"])
+        self.assertEqual(add.call_args.args,
+                         ("demo", "https://provider.example/v1", "DEMO_API_KEY", "model", 131072))
+        self.assertEqual(add.call_args.kwargs["registry_path"], self.config)
+        self.assertEqual(add.call_args.kwargs["wire_api"], "chat")
+
+    def test_provider_run_forwards_flags_and_double_dash(self):
+        for prefix in ([], ["--"]):
+            with patch("codexd_bridge.providers.run_provider", return_value=None) as run:
+                out, _ = self.run_cli("provider", "run", "demo", *prefix, "--help")
+            run.assert_called_once_with("demo", ["--help"], registry_path=self.config)
+            self.assertEqual(out, "")
+
+    def test_provider_connect_retries_existing_route(self):
+        with patch("codexd_bridge.providers.connect_provider", return_value={"enabled": True}) as finish:
+            self.run_cli("provider", "connect", "demo", "--launcher-dir", str(self.home / "bin"))
+        self.assertEqual(finish.call_args.args, ("demo",))
+        self.assertEqual(finish.call_args.kwargs["registry_path"], self.config)
+
+    def test_provider_add_requires_finite_context_information(self):
+        err = self.run_cli_error("provider", "add", "demo", "--base-url", "https://example.com",
+                                 "--env-key", "DEMO_KEY", "--model", "model")
+        self.assertIn("--context-window", err)
+
     def test_connect_verifies_model_before_install_register_enable(self):
         out, _ = self.connect()
         result = json.loads(out)

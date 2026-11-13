@@ -24,6 +24,27 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--config", type=Path, help="Bridge backend registry TOML")
     commands = result.add_subparsers(dest="command")
     commands.add_parser("serve", help="Run the MCP stdio server (default)")
+    provider = commands.add_parser("provider", help="Configure providers and codex-NAME launchers")
+    provider_actions = provider.add_subparsers(dest="provider_action", required=True)
+    add = provider_actions.add_parser("add", help="Create and verify a new provider from connection settings")
+    add.add_argument("name")
+    add.add_argument("--base-url", required=True)
+    add.add_argument("--env-key", required=True, help="API key environment variable NAME, not its value")
+    add.add_argument("--model", required=True)
+    add.add_argument("--context-window", type=int, required=True, help="Provider's documented context limit in tokens")
+    add.add_argument("--effort")
+    add.add_argument("--wire-api", choices=("responses", "chat"), default="responses")
+    add.add_argument("--model-catalog", type=Path, help="Existing native model catalog; otherwise declare only --model")
+    add.add_argument("--home", type=Path, help="New absolute Codex home")
+    finish = provider_actions.add_parser("connect", help="Verify an existing route and install its launcher")
+    finish.add_argument("name")
+    for command in (add, finish):
+        command.add_argument("--launcher-dir", type=Path, help="Launcher directory (default: ~/.local/bin)")
+        command.add_argument("--executable", type=Path, help="Absolute installed codexd-bridge executable")
+        command.add_argument("--timeout", type=float, default=60)
+    run = provider_actions.add_parser("run", help="Run the selected provider's native Codex CLI")
+    run.add_argument("name")
+    run.add_argument("args", nargs=argparse.REMAINDER, help="Arguments forwarded to codex")
     daemon = commands.add_parser("daemon", help="Create or manage an independent Codex daemon")
     actions = daemon.add_subparsers(dest="action", required=True)
     create = actions.add_parser(
@@ -89,7 +110,28 @@ def main(argv: list[str] | None = None) -> None:
 
             create_server(config).run(transport="stdio")
             return
-        if args.command == "daemon" and args.action == "create":
+        if args.command == "provider":
+            from .providers import add_provider, connect_provider, run_provider
+
+            if args.provider_action == "run":
+                forwarded = args.args[1:] if args.args[:1] == ["--"] else args.args
+                output = run_provider(args.name, forwarded, registry_path=config)
+                if output is None:
+                    return
+            else:
+                if args.timeout <= 0:
+                    raise ValueError("timeout must be positive")
+                options = dict(launcher_dir=args.launcher_dir, executable=args.executable,
+                               registry_path=config, timeout=args.timeout)
+                if args.provider_action == "add":
+                    output = add_provider(
+                        args.name, args.base_url, args.env_key, args.model, args.context_window,
+                        effort=args.effort, wire_api=args.wire_api, home=args.home,
+                        model_catalog=args.model_catalog, **options,
+                    )
+                else:
+                    output = connect_provider(args.name, **options)
+        elif args.command == "daemon" and args.action == "create":
             from .provisioning import create_daemon
 
             backend = create_daemon(

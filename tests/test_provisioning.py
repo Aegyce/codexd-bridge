@@ -89,6 +89,37 @@ class ProvisioningTestCase(unittest.TestCase):
 
 
 class CreateDaemonTests(ProvisioningTestCase):
+    def test_inline_catalog_is_private_and_written_before_registration(self):
+        text = '{"models": [{"slug": "model"}]}'
+        backend = create_daemon("demo", self.home("demo"), "openai", "model",
+                                registry_path=self.registry, catalog_text=text)
+        catalog = backend.home / "model-catalog.json"
+        self.assertEqual(catalog.read_text(), text)
+        self.assertEqual(mode(catalog), 0o600)
+        config = tomllib.loads((backend.home / "config.toml").read_text())
+        self.assertEqual(config["model_catalog_json"], str(catalog))
+
+    def test_catalog_failure_leaves_no_home_or_route(self):
+        from codexd_bridge.provisioning import _write_private_config
+
+        def write(path, text):
+            if path.name == "model-catalog.json":
+                raise OSError("catalog write failed")
+            return _write_private_config(path, text)
+
+        with patch("codexd_bridge.provisioning._write_private_config", side_effect=write):
+            with self.assertRaises(ProvisioningError):
+                create_daemon("demo", self.home("demo"), "openai", "model",
+                              registry_path=self.registry, catalog_text='{"models": []}')
+        self.assertFalse(self.home("demo").exists())
+        self.assertFalse(self.registry.exists())
+
+    def test_invalid_catalog_is_rejected_before_creating_home(self):
+        with self.assertRaises(ProvisioningError):
+            create_daemon("demo", self.home("demo"), "openai", "model",
+                          registry_path=self.registry, catalog_text='{}')
+        self.assertFalse(self.home("demo").exists())
+
     def test_openai_without_template_registers_disabled(self):
         backend = self.create_openai(effort="high")
         self.assertIsInstance(backend, Backend)
@@ -639,7 +670,8 @@ class RegistryTests(ProvisioningTestCase):
         }
         with patch(
             "codexd_bridge.provisioning._load_registry",
-            side_effect=[{"gpt": gpt_entry}, {"gpt": gpt_entry, "qwen": qwen_entry}],
+            side_effect=[{"backends": {"gpt": gpt_entry}},
+                         {"backends": {"gpt": gpt_entry, "qwen": qwen_entry}}],
         ):
             with self.assertRaises(ProvisioningError) as ctx:
                 self.create_qwen("qwen")
@@ -688,7 +720,7 @@ class RegistryTests(ProvisioningTestCase):
         conflicting = {"home": str(target), "model_provider": "openai"}
         with patch(
             "codexd_bridge.provisioning._load_registry",
-            return_value={"other": conflicting},
+            return_value={"backends": {"other": conflicting}},
         ):
             with self.assertRaises(ProvisioningError) as ctx:
                 create_daemon("gpt", target, "openai", "gpt-5", registry_path=self.registry)

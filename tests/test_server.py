@@ -18,6 +18,8 @@ class ToolContractTests(unittest.IsolatedAsyncioTestCase):
         for name in ("create_session", "send_message", "fork_session", "steer_session"):
             self.assertFalse(self.tools[name].annotations.read_only_hint)
             self.assertFalse(self.tools[name].annotations.idempotent_hint)
+            self.assertNotIn("ctx", self.tools[name].input_schema["properties"])
+            self.assertNotIn("caller", self.tools[name].input_schema["properties"])
 
     async def test_reads_are_advertised_as_read_only(self):
         for name in (

@@ -36,9 +36,11 @@ description: 使用 Codex Daemon Bridge 创建或接入独立 daemon，发现各
 - 凭据由各 daemon 保管；不要索取、读取或输出密钥。
 - 遇到结果不明的错误（outcome unknown）时，先检查对应会话状态再决定是否重试，不要盲目重发变更操作。
 - 未经任务授权不继续转委派；明确授权的多级协作按指定目标与范围执行，避免自己派给自己或无限循环。
+- 桥接层根据原生 MCP 会话身份、持久化调用关系和原生父会话记录，拒绝向自身或上级会话派发。后端别名和兼容入口共用检查；默认委派深度为 8，可在注册表的 `[delegation]` 中设置 `max_depth`（1–64）。缺少身份时先重新接入；不要伪造身份或绕开检查。升级前未记录关系的桥接任务需重新创建会话。
 
 ## 新 daemon 与后续会话接入
 
+- 从接口地址创建新供应商时，用 `codexd-bridge provider add NAME --base-url URL --env-key VARIABLE_NAME --model MODEL --context-window TOKENS`。用户在环境中配置密钥，命令只保存变量名；按实际接口选择 `--wire-api` 和 `--effort`。检查通过后生成 `codex-NAME`，失败后用 `provider connect NAME` 继续验证并安装启动器。没有外部模型目录时只声明指定模型，不声称已发现供应商全部模型。
 - 用户要求创建新后台时，用已安装的 `codexd-bridge daemon create`，先通过 `--help` 核对参数。明确 provider、模型和新的绝对 `home`；不覆盖现有 home，也不复制凭据或会话历史。非内建 provider 从用户指定的 `--template-home` 复用公开连接设置。
 - 新建后端默认禁用。`daemon start <backend>` 后，用 `connect <backend>` 做真实模型检查、安装本技能并注册 MCP；检查通过后启用派发。`models check <backend> --model <model> --effort <effort>` 可单独验证，临时会话须从目标 daemon 删除。
 - MCP 审批拒绝不能通过伪造只读属性绕过。只有用户明确授权自动派发时，才使用 `connect --allow-session-writes`，该选项仅批准四项会话写工具。

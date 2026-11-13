@@ -21,7 +21,10 @@ def managed_for(executable: Path, registry: Path) -> dict:
         "enabled": True,
         "startup_timeout_sec": 20,
         "tool_timeout_sec": 60,
-        "env": {"CODEXD_BRIDGE_VERSION": __version__},
+        "env": {
+            "CODEXD_BRIDGE_VERSION": __version__,
+            "CODEXD_BRIDGE_CALLER_HOME": str((registry.parent / "daemon-home").resolve()),
+        },
     }
 
 
@@ -107,6 +110,18 @@ class RegisterTests(unittest.TestCase):
     def test_integration_error_is_catchable_as_bridge_error(self):
         self.assertTrue(issubclass(IntegrationError, BridgeError))
 
+    def test_owned_aliases_get_identity_without_changing_permissions(self):
+        alias = {"command": str(self.executable), "args": ["--config", str(self.registry)],
+                 "tools": {"send_message": {"approval_mode": "prompt"}}}
+        foreign = {"command": "/someone/else", "args": []}
+        result, client, _ = self.register({"mcp_servers": {
+            "codex-bridge": alias, "codex-qwen": foreign}})
+        self.assertEqual(result["compatibility_entries"], ["codex-bridge"])
+        updated = client.config["mcp_servers"]["codex-bridge"]
+        self.assertEqual(updated["env"]["CODEXD_BRIDGE_CALLER_HOME"], str(self.home))
+        self.assertEqual(updated["tools"], alias["tools"])
+        self.assertEqual(client.config["mcp_servers"]["codex-qwen"], foreign)
+
     def test_failed_tool_discovery_is_not_a_successful_registration(self):
         client = FakeClient()
         client.tools_ready = False
@@ -144,7 +159,12 @@ class RegisterTests(unittest.TestCase):
                         "keyPath": "mcp_servers.codexd-bridge.env.CODEXD_BRIDGE_VERSION",
                         "value": __version__,
                         "mergeStrategy": "replace",
-                    }
+                    },
+                    {
+                        "keyPath": "mcp_servers.codexd-bridge.env.CODEXD_BRIDGE_CALLER_HOME",
+                        "value": str(self.home.resolve()),
+                        "mergeStrategy": "replace",
+                    },
                 ],
                 "reloadUserConfig": True,
             },
