@@ -58,6 +58,10 @@ STYLE = Style.from_dict(
         "radio-selected": "reverse",
         "error": "ansired",
         "card.focused": "reverse",
+        "overview-panel": "bg:#171e27",
+        "overview.field": "#a8b3c2",
+        "overview.enabled": "#adcab7",
+        "overview.disabled": "#d4b58d",
     }
 )
 
@@ -483,47 +487,59 @@ class BridgeUI:
         return DynamicContainer(self.overview_content)
 
     def overview_content(self):
-        width = self.content_width() - 2
-
-        def cell(value, columns):
+        def shorten(value, columns):
             text = clean(value).replace("\n", " ").replace("\t", " ")
-            if get_cwidth(text) > columns - 2:
-                while text and get_cwidth(text) > columns - 3:
+            if get_cwidth(text) > columns:
+                while text and get_cwidth(text) > columns - 1:
                     text = text[:-1]
                 text += "…"
-            padding = columns - get_cwidth(text)
-            return " " * (padding // 2) + text + " " * (padding - padding // 2)
+            return text
 
-        if self.app.output.get_size().rows < 26:
-            columns = (width - 1) // 2
-            summary = (cell(f"Configured: {len(self.routes)}", columns) + "│"
-                       + cell(f"Bridge enabled: {sum(b.enabled for b in self.routes.values())}",
-                              width - columns - 1)
-                       if self.routes else "No Codex added. Choose Manage backends.")
-            return Frame(Label(summary, align=WindowAlign.CENTER), title="Your Codex", height=3)
+        available = max(3, self.app.output.get_size().rows - 15)
         if not self.routes:
-            return Frame(Label("No Codex added yet.\nChoose Manage backends to get started.",
-                               align=WindowAlign.CENTER),
-                         title="Your Codex", height=4)
-        columns = [(width - 2) // 3] * 2
-        columns.append(width - 2 - sum(columns))
+            message = ("No Codex added yet.\nChoose Manage backends to get started."
+                       if available > 3 else "No Codex added. Choose Manage backends.")
+            return Frame(Label(message, align=WindowAlign.CENTER),
+                         title="Configured backends", height=min(available, 4), style="class:overview-panel")
 
-        def row(values):
-            return "│".join(cell(value, size) for value, size in zip(values, columns))
-
-        lines = [row((b.name, b.model_provider, "Enabled" if b.enabled else "Disabled"))
-                 for b in list(self.routes.values())[:5]]
-        content = [
-            Label(row(("Name", "Provider", "Bridge status")), style="class:title"),
-            Label("┼".join("─" * size for size in columns)),
-            Label("\n".join(lines)),
+        count = len(self.routes)
+        enabled = sum(b.enabled for b in self.routes.values())
+        summary = [
+            ("class:title", f"{count} backends"),
+            ("class:overview.field", " · "),
+            ("class:overview.enabled", f"Bridge: {enabled} enabled"),
         ]
-        if len(self.routes) > 5:
-            content += [Label("─" * width),
-                        Label(f"{len(self.routes) - 5} more · choose an action to view all",
-                              align=WindowAlign.CENTER)]
-        return Frame(HSplit(content), title="Your Codex",
-                     height=len(lines) + 4 + (2 if len(self.routes) > 5 else 0))
+        if enabled < count:
+            summary += [("class:overview.field", " · "),
+                        ("class:overview.disabled", f"{count - enabled} disabled")]
+        columns = max(1, min(3, count, (self.content_width() + 2) // 26))
+        for rows in (2, 1):
+            visible = min(count, rows * columns)
+            height = 5 * ((visible + columns - 1) // columns) + 1 + (visible < count)
+            if height <= available:
+                break
+        else:
+            return Frame(Label(summary, align=WindowAlign.CENTER),
+                         title="Configured backends", height=3, style="class:overview-panel")
+
+        width = min(32, (self.content_width() - 2 * (columns - 1)) // columns)
+        entries = []
+        for backend in list(self.routes.values())[:visible]:
+            status = "Enabled" if backend.enabled else "Disabled"
+            status_style = "class:overview.enabled" if backend.enabled else "class:overview.disabled"
+            entries.append(Frame(HSplit([
+                Label([("class:overview.field", " Provider  "),
+                       ("", shorten(backend.model_provider, width - 14))]),
+                Label([("class:overview.field", " Bridge    "), (status_style, status)]),
+            ], width=Dimension(min=20)), title=shorten(backend.name, width - 8),
+                width=width, height=4, style="class:overview-panel"))
+        content = [Label(summary, align=WindowAlign.CENTER), Window(height=1),
+                   HSplit([VSplit(entries[i:i + columns], padding=2, align=HorizontalAlign.CENTER)
+                           for i in range(0, len(entries), columns)], padding=1)]
+        if visible < count:
+            content.append(Label(f"+ {count - visible} more configured", align=WindowAlign.CENTER,
+                                 style="class:overview.field"))
+        return HSplit(content, height=height)
 
     def home(self):
         self.menu = self.home

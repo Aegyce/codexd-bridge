@@ -459,6 +459,30 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertAlmostEqual((lines[top].index("┌") + lines[top].rindex("┐")) / 2,
                                        (columns - 1) / 2, delta=1)
 
+    async def test_backend_overview_groups_identity_and_keeps_counts_readable(self):
+        routes = {
+            "review": Backend("review", self.root / "review", "qwen", enabled=False),
+            "draft": Backend("draft", self.root / "draft", "openai"),
+        }
+        self.ui.routes = routes
+        self.ui.app.invalidate()
+        await asyncio.sleep(.05)
+        lines = self.rendered().splitlines()
+        for name, provider, status in (("review", "qwen", "Disabled"),
+                                       ("draft", "openai", "Enabled")):
+            y = next(i for i, line in enumerate(lines) if f" {name} " in line)
+            x = lines[y].index(f" {name} ")
+            left, right = lines[y].rindex("┌", 0, x), lines[y].index("┐", x)
+            self.assertIn(provider, lines[y + 1][left:right])
+            self.assertIn(status, lines[y + 2][left:right])
+        self.output.size = Size(rows=18, columns=60)
+        self.ui.routes = {str(i): Backend(str(i), self.root / str(i), "openai", enabled=bool(i % 2))
+                          for i in range(12)}
+        self.ui.app.invalidate()
+        await asyncio.sleep(.05)
+        self.assertIn("12 backends · Bridge: 6 enabled · 6 disabled", self.rendered())
+        self.assertIn("Manage backends", self.rendered())
+
     async def test_create_daemon_configuration_and_switch_registry_from_tui(self):
         self.ui.more_tools()
         with patch("codexd_bridge.provisioning.create_daemon",
