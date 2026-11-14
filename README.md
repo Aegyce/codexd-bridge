@@ -120,15 +120,22 @@ The example below shows the running interface with `qwen` selected.
 
 ![Running Use backend screen with work and navigation options](docs/images/tui-use.png)
 
-| Area | Option | Result |
-| --- | --- | --- |
-| 1 · Work | 1 · Open Codex | Opens native Codex with the selected backend's configuration; returns to the manager when it closes. |
-| 1 · Work | 2 · Account status | Shows the backend's provider, model, authentication and account metadata; does not verify model access or credits. |
-| 1 · Work | 3 · Sessions | Lists this backend's sessions; supports creating, reading, continuing, forking and steering tasks. |
-| 1 · Work | 4 · Models | Lists this backend's models; open a model's details to verify access or create a session. |
-| 1 · Work | 5 · All models | Lists model catalogs across configured backends and any discovery errors. |
-| 2 · Navigate | 1 · Switch backend | Returns to backend selection; shown when more than one backend is configured. |
-| 2 · Navigate | 2 · Home | Returns to the two-card home screen; numbered 1 when Switch backend is absent. |
+#### 1 · Work
+
+| Option | Result |
+| --- | --- |
+| 1 · Open Codex | Opens native Codex with the selected backend's configuration; returns to the manager when it closes. |
+| 2 · Account status | Shows the backend's provider, model, authentication and account metadata; does not verify model access or credits. |
+| 3 · Sessions | Lists this backend's sessions; supports creating, reading, continuing, forking and steering tasks. |
+| 4 · Models | Lists this backend's models; open a model's details to verify access or create a session. |
+| 5 · All models | Lists model catalogs across configured backends and any discovery errors. |
+
+#### 2 · Navigate
+
+| Option | Result |
+| --- | --- |
+| 1 · Switch backend | Returns to backend selection; shown when more than one backend is configured. |
+| 2 · Home | Returns to the two-card home screen; numbered 1 when Switch backend is absent. |
 
 ### 2. Manage backends
 
@@ -137,22 +144,34 @@ with totals above. Short terminals show the totals; additional backends are coun
 
 ![Running management screen with setup, daemon and tools columns](docs/images/tui-manager.png)
 
-| Area | Option | Result |
-| --- | --- | --- |
-| 1 · Setup | 1 · Set up this Codex | Opens the guided form above to enable bridge tools for a Codex configuration directory. |
-| 1 · Setup | 2 · Current Codex | Inspects the default Codex directory's running backend, including when it has not been registered with the bridge. |
-| 1 · Setup | 3 · New provider | Creates an independent provider configuration and launcher through the form above. |
-| 1 · Setup | 4 · Attach existing | Adds an existing Codex directory to the registry; use Connect bridge to verify and enable it. |
-| 1 · Setup | 5 · Connect bridge | Selects a registered backend, verifies model access and installs or refreshes its guide and MCP integration. |
-| 1 · Setup | 6 · Install launcher | Installs `codex-NAME` for a registered backend, without starting a daemon or making a model request. |
-| 2 · Daemon | 1 · Daemon status | Checks whether the selected backend's Codex service is running. |
-| 2 · Daemon | 2 · Start daemon | Starts the selected backend's Codex service. |
-| 2 · Daemon | 3 · Stop daemon | Stops the selected service after confirmation, interrupting its active tasks. |
-| 2 · Daemon | 4 · Remove daemon | Stops and removes one backend; its data is retained unless deletion is explicitly selected. |
-| 3 · Tools | 1 · More tools | Opens the additional actions listed below. |
-| 3 · Tools | 2 · Refresh | Reloads the configured backend list and bridge status. |
-| 3 · Tools | 3 · Home | Returns to the two-card home screen. |
-| 3 · Tools | 4 · Quit | Closes the manager; running daemons remain active. |
+#### 1 · Setup
+
+| Option | Result |
+| --- | --- |
+| 1 · Set up this Codex | Opens the guided form above to enable bridge tools for a Codex configuration directory. |
+| 2 · Current Codex | Inspects the default Codex directory's running backend, including when it has not been registered with the bridge. |
+| 3 · New provider | Creates an independent provider configuration and launcher through the form above. |
+| 4 · Attach existing | Adds an existing Codex directory to the registry; use Connect bridge to verify and enable it. |
+| 5 · Connect bridge | Selects a registered backend, verifies model access and installs or refreshes its guide and MCP integration. |
+| 6 · Install launcher | Installs `codex-NAME` for a registered backend, without starting a daemon or making a model request. |
+
+#### 2 · Daemon
+
+| Option | Result |
+| --- | --- |
+| 1 · Daemon status | Checks whether the selected backend's Codex service is running. |
+| 2 · Start daemon | Starts the selected backend's Codex service. |
+| 3 · Stop daemon | Stops the selected service after confirmation, interrupting its active tasks. |
+| 4 · Remove daemon | Stops and removes one backend; its data is retained unless deletion is explicitly selected. |
+
+#### 3 · Tools
+
+| Option | Result |
+| --- | --- |
+| 1 · More tools | Opens the additional actions listed below. |
+| 2 · Refresh | Reloads the configured backend list and bridge status. |
+| 3 · Home | Returns to the two-card home screen. |
+| 4 · Quit | Closes the manager; running daemons remain active. |
 
 With no configured backends, Connect bridge, Install launcher and the Daemon area are hidden; Tools becomes area 2.
 Actions needing a target open backend selection when several are configured.
