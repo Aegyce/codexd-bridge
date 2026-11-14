@@ -39,7 +39,7 @@ from . import __version__
 from .config import load_backends
 from .delegation import OperatorGuard
 from .sessions import Bridge
-from .tui_i18n import HELP, load_language, save_language, translate, wrap_text
+from .tui_i18n import HELP, diagnostic_text, load_language, save_language, translate, wrap_text
 
 STAGES = {
     "configuration": "Prepare the provider configuration",
@@ -216,7 +216,8 @@ class BridgeUI:
                 self.label(lambda: self.t("Keyboard shortcuts") if self.help_open else self.display_title(), style="class:title", align=WindowAlign.CENTER),
                 Window(char="─", height=1, style="class:separator"),
                 VSplit([Window(width=3), DynamicContainer(self.visible_body), Window(width=3)]),
-                self.label(lambda: self.t(self.notice), style="class:error", align=WindowAlign.CENTER),
+                self.label(lambda: self.notice() if callable(self.notice) else self.t(self.notice),
+                           style="class:error", align=WindowAlign.CENTER),
                 self.label(self.footer, wrap=False,
                     style="class:footer",
                     align=WindowAlign.CENTER,
@@ -255,6 +256,9 @@ class BridgeUI:
         return Frame(body, title=caption, **kwargs)
 
     def display_title(self):
+        translated = self.t(self.title)
+        if translated != self.title:
+            return translated
         if " / " in self.title:
             prefix, value = self.title.split(" / ", 1)
             return self.t(prefix) + " · " + value
@@ -812,9 +816,9 @@ class BridgeUI:
                   self.label(lambda: clean(f"Codex: {target.name}\n{self.t('Provider')}: {target.model_provider}")), [
                       ("Open Codex", self.open_codex), ("Account status", lambda: self.codex_status(target.home)),
                       ("Sessions", self.sessions),
-                      ("Models", self.models), ("All models", self.all_models),
+                      ("Backend models", self.models), ("Model overview", self.all_models),
                   ] + navigation, back=self.home, screen="use", action_groups=[
-                      ("Work", ["Open Codex", "Account status", "Sessions", "Models", "All models"]),
+                      ("Work", ["Open Codex", "Account status", "Sessions", "Backend models", "Model overview"]),
                       ("Navigate", [label for label, _ in navigation]),
                   ])
 
@@ -1152,20 +1156,23 @@ class BridgeUI:
         self.busy = True
 
         async def run():
+            error = None
             try:
-                try:
-                    code = await run_in_terminal(function, in_executor=True)
-                finally:
-                    self.busy = False
-            except (RuntimeError, ValueError, OSError) as error:
+                code = await run_in_terminal(function, in_executor=True)
+            except (RuntimeError, ValueError, OSError) as failure:
+                error = failure
+            finally:
+                self.busy = False
+            if self.close_when_done:
+                self.app.exit()
+            elif error is not None:
                 self.text("Could not open Codex", str(error), back=back)
+            elif isinstance(code, dict):
+                self.text("Daemon result", "\n".join(f"{key}: {clean(value)}" for key, value in code.items()), back=back)
             else:
-                if isinstance(code, dict):
-                    self.text("Daemon result", "\n".join(f"{key}: {clean(value)}" for key, value in code.items()), back=back)
-                else:
-                    back()
-                    if code:
-                        self.notice = f"Codex exited with status {code}."
+                back()
+                if code:
+                    self.notice = self.message("Codex exited with status {code}.", code=code)
 
         self.worker = self.app.create_background_task(run())
 
@@ -1313,12 +1320,16 @@ class BridgeUI:
         from .diagnostics import diagnose
 
         def display(result):
-            lines = ["Codex Daemon Bridge " + result["version"], ""]
-            for check in result["checks"]:
-                lines.append(f"[{check['status']}] {check['name']}: {check['detail']}")
-                if check["advice"]:
-                    lines.append("  " + check["advice"])
-            self.text("Installation diagnostics", "\n".join(lines),
+            def content():
+                lines = ["Codex Daemon Bridge " + result["version"], ""]
+                for check in result["checks"]:
+                    status, name, detail = (diagnostic_text(self.language, check[key])
+                                            for key in ("status", "name", "detail"))
+                    lines.append(f"[{status}] {name}: {detail}")
+                    if check["advice"]:
+                        lines.append("  " + diagnostic_text(self.language, check["advice"]))
+                return "\n".join(lines)
+            self.text("Installation diagnostics", content,
                       [("Set up this Codex", self.setup_codex), ("Choose registry", self.choose_registry)],
                       back=self.more_tools)
 
@@ -1452,16 +1463,19 @@ class BridgeUI:
             ],
         )
 
-    def models(self, cursor=None):
+    def models(self, cursor=None, *, back=None):
         self.work(
             "Loading models",
             lambda _p: self.bridge.list_models(self.selected, cursor, 30),
-            self.model_list,
-            retry=lambda: self.models(cursor),
+            lambda result: self.model_list(result, cursor=cursor, back=back),
+            retry=lambda: self.models(cursor, back=back),
+            back=back,
         )
 
-    def model_list(self, result):
+    def model_list(self, result, *, cursor=None, back=None):
         models = result["models"]
+        def page():
+            self.models(cursor, back=back)
 
         def details(index):
             model = models[index]
@@ -1475,46 +1489,59 @@ class BridgeUI:
                 "Model details",
                 text,
                 [
-                    ("Verify model", lambda: self.verify_model(model)),
-                    ("New session", lambda: self.new_session(model)),
+                    ("Verify model", lambda: self.verify_model(model, back=page)),
+                    ("New session", lambda: self.new_session(model, back=page)),
                 ],
-                back=self.models,
+                back=page,
             )
 
         actions = [("Details", details)]
         if result.get("next_cursor"):
-            actions.append(("Next page", lambda _i: self.models(result["next_cursor"])))
+            actions.append(("Next page", lambda _i: self.models(result["next_cursor"], back=back)))
+        if not models:
+            navigation = [("Next page", lambda: self.models(result["next_cursor"], back=back))] if result.get("next_cursor") else []
+            self.text("Models / " + self.selected, "No models on this page.", navigation, back=back)
+            return
         self.choose(
             "Models / " + self.selected,
             [(i, clean(m["model"])) for i, m in enumerate(models)],
             actions,
+            back=back,
             description="Available model IDs come from this daemon's current catalog.",
         )
 
     def all_models(self):
         def display(result):
-            lines = []
-            for provider in result["providers"]:
-                lines += [
-                    provider["backend"],
-                    "  "
-                    + (
-                        ", ".join(m["model"] for m in provider.get("models", []))
-                        if provider.get("reachable")
-                        else provider.get("error", "Unavailable")
-                    ),
-                    "",
-                ]
-            self.text("Models across providers", "\n".join(lines), [("Refresh", self.all_models)])
+            def content():
+                lines = [self.t("Model catalogs only; model access has not been verified."), ""]
+                for provider in result["providers"]:
+                    lines.append(provider["backend"])
+                    if provider.get("reachable"):
+                        models = provider.get("models", [])
+                        lines.extend("  " + model["model"] for model in models)
+                        if not models:
+                            lines.append("  " + self.t("No models returned."))
+                        if provider.get("next_cursor"):
+                            lines.append("  " + self.t("Showing {count} models; more are available.", count=len(models)))
+                    else:
+                        lines.append("  " + provider.get("error", self.t("Unavailable")))
+                    lines.append("")
+                return "\n".join(lines)
+            actions = [("Refresh", self.all_models)]
+            if result["providers"]:
+                actions.insert(0, ("Browse backend", lambda: self.choose_backend(
+                    lambda: self.models(back=self.all_models), back=self.all_models)))
+            self.text("Model overview", content, actions)
 
         self.work(
             "Discovering provider models", lambda _p: self.bridge.list_provider_models(), display
         )
 
-    def verify_model(self, model):
+    def verify_model(self, model, *, back=None):
         from .probe import check_model
 
         target = self.bridge.backend(self.selected)
+        back = back or self.models
         choices = (("", "Provider default"),) + tuple(
             (r["reasoningEffort"], r["reasoningEffort"])
             for r in model.get("supportedReasoningEfforts") or []
@@ -1530,34 +1557,40 @@ class BridgeUI:
                 lambda _r: self.text(
                     "Model verified",
                     "A real response was verified and the test session was deleted.",
-                    back=self.models,
+                    back=back,
                 ),
-                back=self.models,
+                back=back,
             )
 
         self.form(
             "Verify model access",
             [Field("effort", "Reasoning effort", default_effort, choices=choices)],
             verify,
-            back=self.models,
+            back=back,
             label="Run verification",
             intro="This sends one short model request.",
         )
 
     def sessions(self, cursor=None):
+        def page():
+            self.sessions(cursor)
+
         def display(result):
             sessions = result["sessions"]
             actions = [
-                ("Open session", self.session),
-                ("New session", lambda _id: self.new_session()),
+                ("Open session", lambda thread: self.session(thread, back=page)),
+                ("New session", lambda _id: self.new_session(back=page)),
             ]
             if result.get("next_cursor"):
                 actions.append(("Next page", lambda _id: self.sessions(result["next_cursor"])))
             if not sessions:
+                navigation = [("New session", lambda: self.new_session(back=page))]
+                if result.get("next_cursor"):
+                    navigation.append(("Next page", lambda: self.sessions(result["next_cursor"])))
                 self.text(
                     "Sessions / " + self.selected,
-                    "No sessions yet.",
-                    [("New session", self.new_session)],
+                    "No sessions on this page." if cursor or result.get("next_cursor") else "No sessions yet.",
+                    navigation,
                 )
                 return
             self.choose(
@@ -1581,7 +1614,8 @@ class BridgeUI:
             retry=lambda: self.sessions(cursor),
         )
 
-    def new_session(self, model=None):
+    def new_session(self, model=None, *, back=None):
+        back = back or self.sessions
         specs = [
             Field("title", "Session title"),
             Field("cwd", "Working directory", str(Path.cwd())),
@@ -1621,11 +1655,11 @@ class BridgeUI:
                     acceptance_criteria=data["acceptance_criteria"] or None,
                 ),
                 self.accepted,
-                back=self.sessions,
+                back=back,
             )
 
         self.form(
-            "New session / " + self.selected, specs, create, back=self.sessions, label="Start task"
+            "New session / " + self.selected, specs, create, back=back, label="Start task"
         )
 
     def accepted(self, result):
@@ -1637,17 +1671,22 @@ class BridgeUI:
             back=self.sessions,
         )
 
-    def session(self, thread_id, cursor=None):
+    def session(self, thread_id, cursor=None, *, back=None):
+        back = back or self.sessions
         self.work(
             "Reading session",
             lambda _p: self.bridge.read_session(self.selected, thread_id, 3, 16000, cursor),
-            lambda result: self.session_view(result),
-            back=self.sessions,
+            lambda result: self.session_view(result, cursor=cursor, back=back),
+            back=back,
         )
 
-    def session_view(self, result):
+    def session_view(self, result, *, cursor=None, back=None):
         session = result["session"]
         thread_id = session["id"]
+        back = back or self.sessions
+        def page():
+            self.session(thread_id, cursor, back=back)
+
         def content():
             lines = [
                 session.get("name") or thread_id,
@@ -1675,30 +1714,31 @@ class BridgeUI:
             return "\n".join(lines)
 
         active = next((t for t in result["turns"] if t["status"] == "inProgress"), None)
-        actions = [("Refresh", lambda: self.session(thread_id))]
+        actions = [("Refresh", page)]
         if active:
             actions.append(
-                ("Add instructions", lambda: self.message_session(thread_id, "steer", active["id"]))
+                ("Add instructions", lambda: self.message_session(thread_id, "steer", active["id"], back=page))
             )
         elif session.get("status", {}).get("type") != "active":
-            actions.append(("Continue", lambda: self.message_session(thread_id, "continue")))
+            actions.append(("Continue", lambda: self.message_session(thread_id, "continue", back=page)))
         actions += [
-            ("Fork session", lambda: self.message_session(thread_id, "fork")),
+            ("Fork session", lambda: self.message_session(thread_id, "fork", back=page)),
             (
                 "Read a turn",
                 lambda: self.choose(
                     "Choose a turn",
                     [(t["id"], f"{t['id']} / {t['status']}") for t in result["turns"]],
-                    [("Read messages", lambda turn: self.messages(thread_id, turn))],
-                    back=lambda: self.session(thread_id),
+                    [("Read messages", lambda turn: self.messages(thread_id, turn, back=page))],
+                    back=page,
                 ),
             ),
         ]
         if result.get("next_cursor"):
-            actions.append(("Older turns", lambda: self.session(thread_id, result["next_cursor"])))
-        self.text("Session / " + self.selected, content, actions, back=self.sessions)
+            actions.append(("Older turns", lambda: self.session(thread_id, result["next_cursor"], back=back)))
+        self.text("Session / " + self.selected, content, actions, back=back)
 
-    def messages(self, thread, turn, cursor=None):
+    def messages(self, thread, turn, cursor=None, *, back=None):
+        back = back or (lambda: self.session(thread))
         def display(result):
             def content():
                 lines = [m["type"] + (self.t(" (continued)") if m.get("text_offset") else "")
@@ -1706,7 +1746,7 @@ class BridgeUI:
                          for m in result["messages"]]
                 return "\n\n".join(lines) or self.t("No visible messages.")
             actions = (
-                [("More messages", lambda: self.messages(thread, turn, result["next_cursor"]))]
+                [("More messages", lambda: self.messages(thread, turn, result["next_cursor"], back=back))]
                 if result.get("next_cursor")
                 else []
             )
@@ -1714,7 +1754,7 @@ class BridgeUI:
                 "Turn messages",
                 content,
                 actions,
-                back=lambda: self.session(thread),
+                back=back,
             )
 
         self.work(
@@ -1723,10 +1763,11 @@ class BridgeUI:
                 self.selected, thread, turn, cursor, text_limit=16000
             ),
             display,
-            back=lambda: self.session(thread),
+            back=back,
         )
 
-    def message_session(self, thread, mode, turn=None):
+    def message_session(self, thread, mode, turn=None, *, back=None):
+        back = back or (lambda: self.session(thread))
         fields = [Field("title", "Fork title"), Field("session_type", "Session type", "worker"),
                   Field("acceptance_criteria", "Acceptance criteria (optional)", multiline=True)
                   ] if mode == "fork" else []
@@ -1764,14 +1805,14 @@ class BridgeUI:
                 )
 
             self.work(
-                "Sending instructions", operation, self.accepted, back=lambda: self.session(thread)
+                "Sending instructions", operation, self.accepted, back=back
             )
 
         self.form(
             mode.title() + " session",
             fields,
             send,
-            back=lambda: self.session(thread),
+            back=back,
             label="Send instructions",
         )
 

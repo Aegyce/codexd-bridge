@@ -1,7 +1,9 @@
 """Removal boundaries, retry behavior and preservation of other daemons."""
 
+import errno
 import io
 import json
+import os
 import socket
 import tempfile
 import tomllib
@@ -180,6 +182,44 @@ class RemovalTests(unittest.TestCase):
         self.assertFalse(load_backends(self.registry)["demo"].enabled)
         self.assertTrue(self.home.exists())
         self.assertTrue(self.remove(purge=True)["data_deleted"])
+
+    def test_purge_retries_a_late_file_from_a_stopped_background_job(self):
+        rmdir = os.rmdir
+        writes = []
+        def late_write(path, **kwargs):
+            if Path(path) == self.home and not writes:
+                (self.home / "late-plugin-file").write_text("background output")
+                writes.append(path)
+            return rmdir(path, **kwargs)
+        with patch("codexd_bridge.removal.shutil.os.rmdir", side_effect=late_write):
+            self.assertTrue(self.remove(purge=True)["data_deleted"])
+        self.assertEqual(len(writes), 1)
+        self.assertFalse(self.home.exists())
+        self.assertEqual((self.other / "session.json").read_text(), "session data")
+
+    def test_purge_retry_keeps_a_replacement_directory(self):
+        old = self.root / "original"
+        def replace(_path):
+            self.home.rename(old)
+            self.home.mkdir()
+            (self.home / "keep").write_text("replacement data")
+            raise OSError(errno.ENOTEMPTY, "late write")
+        with patch("codexd_bridge.removal.shutil.rmtree", side_effect=replace), \
+                patch("codexd_bridge.removal.time.sleep"):
+            with self.assertRaisesRegex(BridgeError, "directory changed"):
+                self.remove(purge=True)
+        self.assertEqual((self.home / "keep").read_text(), "replacement data")
+        self.assertTrue((old / "session.json").exists())
+        self.assertFalse(load_backends(self.registry)["demo"].enabled)
+
+    def test_purge_retry_stops_at_deadline(self):
+        with patch("codexd_bridge.removal.shutil.rmtree", side_effect=OSError(errno.ENOTEMPTY, "late write")) as remove, \
+                patch("codexd_bridge.removal.time.monotonic", side_effect=[0, 2]), \
+                patch("codexd_bridge.removal.detach_home", return_value=None):
+            with self.assertRaisesRegex(BridgeError, "route remains disabled"):
+                self.remove(purge=True, timeout=1)
+        remove.assert_called_once_with(self.home)
+        self.assertTrue((self.home / "session.json").exists())
 
     def test_modified_and_foreign_launchers_are_retained(self):
         self.launcher.write_text("a replacement command")

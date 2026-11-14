@@ -489,7 +489,7 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
                          "Verify model ID", "Codex arguments"}.issubset(self.ui.buttons))
         self.ui.home()
         self.activate("Use backend")
-        self.assertTrue({"Open Codex", "Models", "Sessions", "All models"}.issubset(self.ui.buttons))
+        self.assertTrue({"Open Codex", "Backend models", "Sessions", "Model overview"}.issubset(self.ui.buttons))
 
     async def test_diagnostics_are_accessible_when_registry_is_corrupt(self):
         self.registry.write_text("invalid = [")
@@ -748,6 +748,138 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
             await self.until(lambda: not self.ui.busy)
         check.assert_called_once_with(backend, model="picked-model", effort="low")
 
+    async def test_model_overview_discloses_more_results_and_opens_backend_catalog(self):
+        self.register()
+        self.ui.backend_menu()
+        self.ui.bridge.list_provider_models = Mock(return_value={"providers": [
+            {"backend": "demo", "reachable": True, "models": [{"model": "first-model"}],
+             "next_cursor": "more"},
+            {"backend": "offline", "reachable": False, "error": "Backend unavailable"},
+            {"backend": "empty", "reachable": True, "models": [], "next_cursor": None},
+        ]})
+        self.ui.bridge.list_models = Mock(return_value={"models": [{"model": "first-model"}],
+                                                       "next_cursor": None})
+        self.ui.all_models()
+        await self.until(lambda: not self.ui.busy)
+        await self.until(lambda: "more are available" in self.rendered())
+        self.assertIn("Backend unavailable", self.rendered())
+        self.assertIn("No models returned", self.rendered())
+        self.pipe.send_text("\x1bOQ")
+        await self.until(lambda: "还有更多模型" in self.rendered())
+        self.activate("Browse backend")
+        await self.until(lambda: not self.ui.busy and self.ui.title == "Models / demo")
+        self.ui.bridge.list_models.assert_called_once_with("demo", None, 30)
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy and self.ui.title == "Model overview")
+
+    async def test_model_details_and_verification_return_to_the_current_page(self):
+        self.register()
+        self.ui.bridge.list_models = Mock(side_effect=lambda _backend, cursor, _limit: {
+            "models": [{"model": "first" if cursor is None else "second"}],
+            "next_cursor": "page-two" if cursor is None else None,
+        })
+        self.ui.models()
+        await self.until(lambda: not self.ui.busy)
+        self.activate("Next page")
+        await self.until(lambda: not self.ui.busy)
+        self.activate("Details")
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.list_models.assert_called_with("demo", "page-two", 30)
+        self.activate("Details")
+        self.activate("New session")
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.list_models.assert_called_with("demo", "page-two", 30)
+        self.activate("Details")
+        self.activate("Verify model")
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.list_models.assert_called_with("demo", "page-two", 30)
+
+    async def test_empty_model_and_session_pages_preserve_next_page_navigation(self):
+        self.register()
+        for method, action, key, unavailable in (
+            ("list_models", self.ui.models, "models", "Details"),
+            ("list_sessions", self.ui.sessions, "sessions", "Open session"),
+        ):
+            with self.subTest(method=method):
+                listing = Mock(side_effect=[{key: [], "next_cursor": "next"},
+                                            {key: [], "next_cursor": None}])
+                setattr(self.ui.bridge, method, listing)
+                action()
+                await self.until(lambda: not self.ui.busy)
+                self.assertNotIn(unavailable, self.ui.buttons)
+                self.activate("Next page")
+                await self.until(lambda: not self.ui.busy)
+                self.assertEqual(listing.call_args.args[:2], ("demo", "next"))
+                self.assertNotIn("Next page", self.ui.buttons)
+
+    async def test_diagnostics_and_native_exit_notice_follow_language_switch(self):
+        self.ui.toggle_language()
+        result = {"version": "test", "checks": [
+            {"name": "Codex CLI", "status": "error", "detail": "Not found on PATH",
+             "advice": "Install Codex CLI and reopen this terminal."},
+            {"name": "Provider registry", "status": "ok", "detail": "3 backend(s)", "advice": None},
+            {"name": "demo", "status": "ok", "detail": "Provider binding matches; route enabled; control socket present",
+             "advice": None},
+            {"name": "mcp", "status": "warning", "detail": "old",
+             "advice": "This release was validated with mcp 2.3.0."},
+        ]}
+        with patch("codexd_bridge.diagnostics.diagnose", return_value=result):
+            self.ui.diagnostics()
+            await self.until(lambda: not self.ui.busy)
+        await self.until(lambda: "在 PATH 中未找到" in self.rendered())
+        self.assertIn("后端注册文件: 3 个后端", self.rendered())
+        self.assertIn("供应商绑定一致", self.rendered())
+        self.assertIn("此版本使用 mcp 2.3.0 完成验证", self.rendered())
+        self.pipe.send_text("\x1bOQ")
+        await self.until(lambda: "Not found on PATH" in self.rendered())
+        with patch("codexd_bridge.tui.run_in_terminal", new=AsyncMock(return_value=3)):
+            self.ui.run_native(lambda: 3, back=self.ui.home)
+            await self.until(lambda: not self.ui.busy)
+        await self.until(lambda: "Codex exited with status 3." in self.rendered())
+        self.pipe.send_text("\x1bOQ")
+        await self.until(lambda: "退出码为 3" in self.rendered())
+
+    async def test_history_navigation_returns_to_turn_and_session_list_pages(self):
+        self.register()
+        self.ui.bridge.list_sessions = Mock(side_effect=lambda _backend, cursor=None: {
+            "sessions": [{"id": "thread", "status": {"type": "idle"}}],
+            "next_cursor": "list-two" if cursor is None else None,
+        })
+        self.ui.bridge.read_session = Mock(side_effect=lambda *args: {
+            "session": {"id": "thread", "status": {"type": "idle"}},
+            "turns": [{"id": "old-turn" if args[-1] else "new-turn", "status": "completed", "messages": []}],
+            "next_cursor": None if args[-1] else "older-turns",
+        })
+        self.ui.bridge.read_messages = Mock(return_value={"messages": [], "next_cursor": "more-messages"})
+        self.ui.sessions()
+        await self.until(lambda: not self.ui.busy)
+        self.activate("Next page")
+        await self.until(lambda: not self.ui.busy)
+        self.activate("Open session")
+        await self.until(lambda: not self.ui.busy)
+        self.activate("Older turns")
+        await self.until(lambda: not self.ui.busy)
+        for action in ("Read a turn", "Fork session", "Continue"):
+            self.activate(action)
+            self.activate("Back")
+            await self.until(lambda: not self.ui.busy)
+            self.ui.bridge.read_session.assert_called_with("demo", "thread", 3, 16000, "older-turns")
+        self.activate("Read a turn")
+        self.activate("Read messages")
+        await self.until(lambda: not self.ui.busy)
+        self.activate("More messages")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.read_messages.assert_called_with("demo", "thread", "old-turn", "more-messages", text_limit=16000)
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.read_session.assert_called_with("demo", "thread", 3, 16000, "older-turns")
+        self.activate("Back")
+        await self.until(lambda: not self.ui.busy)
+        self.ui.bridge.list_sessions.assert_called_with("demo", "list-two")
+
     async def test_active_session_steers_expected_turn_and_does_not_retry_failure(self):
         self.register()
         self.ui.session_view(
@@ -878,6 +1010,21 @@ class TerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.ui.title, "Daemon result")
         await asyncio.sleep(.05)
         self.assertIn("status: running", self.rendered())
+
+    async def test_quit_during_native_handoff_waits_then_exits(self):
+        gate = asyncio.Event()
+        async def native(*_args, **_kwargs):
+            await gate.wait()
+            return 0
+        back = Mock()
+        with patch("codexd_bridge.tui.run_in_terminal", side_effect=native):
+            self.ui.run_native(lambda: 0, back=back)
+            self.ui.quit()
+            self.assertFalse(self.task.done())
+            gate.set()
+            await self.until(self.task.done)
+        self.assertFalse(self.ui.busy)
+        back.assert_not_called()
 
     async def test_changed_registry_error_is_shown_in_the_interface(self):
         self.register()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -149,13 +150,23 @@ def remove_daemon(name: str, *, registry_path: Path | None = None, purge=False,
                         continue
                 kept.append(str(path))
             if purge and target.home.exists():
-                _validate_scope(target, routes, registry, executable, True)
-                current = target.home.stat()
-                if identity is None or (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
-                    raise BridgeError("The daemon directory changed during removal")
-                if _running(target.home):
-                    raise BridgeError("The daemon started again; its data was retained")
-                shutil.rmtree(target.home)
+                deadline = time.monotonic() + timeout
+                while target.home.exists():
+                    _validate_scope(target, routes, registry, executable, True)
+                    current = target.home.stat()
+                    if identity is None or (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino):
+                        raise BridgeError("The daemon directory changed during removal")
+                    if _running(target.home):
+                        raise BridgeError("The daemon started again; its data was retained")
+                    try:
+                        shutil.rmtree(target.home)
+                    except OSError as error:
+                        # A stopped daemon's helper can finish writing temporary
+                        # files during deletion. Recheck ownership and the listener
+                        # before retrying only these transient filesystem races.
+                        if error.errno not in (errno.ENOTEMPTY, errno.ENOENT) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.1)
                 kept = [path for path in kept if os.path.lexists(path)]
             index = registration_index(executable, registry)
             if index.exists():

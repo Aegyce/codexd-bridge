@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Distinguish backend model browsing from the cross-backend overview and disclose partial catalogs.
+- Preserve model and session pages when returning from details and actions; retain pagination on empty pages with a next cursor.
+- Honor deferred exit requests after returning from native Codex.
+- Translate diagnostic results and native exit notices when switching the interface language.
+- Retry transient directory-cleanup races during explicit daemon purge, rechecking the target and running service before each attempt.
 - Add Chinese/English TUI switching, saved language preferences and shortcut help.
 - Add numbered function areas, Vim-style navigation and contextual shortcut hints; Alt+1–9 focuses actions before Enter runs them.
 - Align each card's title and description on one axis in both languages, preserving its center when focused.

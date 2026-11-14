@@ -127,8 +127,8 @@ The example below shows the running interface with `qwen` selected.
 | 1 · Open Codex | Opens native Codex with the selected backend's configuration; returns to the manager when it closes. |
 | 2 · Account status | Shows the backend's provider, model, authentication and account metadata; does not verify model access or credits. |
 | 3 · Sessions | Lists this backend's sessions; supports creating, reading, continuing, forking and steering tasks. |
-| 4 · Models | Lists this backend's models; open a model's details to verify access or create a session. |
-| 5 · All models | Lists model catalogs across configured backends and any discovery errors. |
+| 4 · Backend models | Pages through the selected backend's models; open a model's details to verify access or create a session. |
+| 5 · Model overview | Summarizes catalogs across configured backends and discovery errors. Marks partial lists; choose Browse backend to open a backend's paginated catalog. |
 
 #### 2 · Navigate
 

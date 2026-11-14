@@ -149,8 +149,9 @@ def provider_setup(registry, http, command):
         status = subprocess.run([result["launcher"], "server", "status"], env=env, cwd="/",
                                 capture_output=True, text=True, check=True, timeout=15)
         require(json.loads(status.stdout)["status"] == "running", "Generated launcher cannot find its daemon")
-        subprocess.run([*argv, "daemon", "remove", "onboarded", "--purge"], env=env, cwd="/",
-                       capture_output=True, text=True, check=True, timeout=60)
+        removed = subprocess.run([*argv, "daemon", "remove", "onboarded", "--purge"], env=env, cwd="/",
+                                 capture_output=True, text=True, timeout=60)
+        require(removed.returncode == 0, "Installed provider removal failed: " + removed.stderr[-2000:])
         require(not home.exists() and not Path(result["launcher"]).exists(), "Provider removal left owned files")
         require(set(load_backends(registry)) == {"a", "b"}, "Provider removal affected other routes")
     finally:

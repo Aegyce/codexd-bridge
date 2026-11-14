@@ -27,7 +27,12 @@ ZH = {
     "Home": "首页", "Back": "返回", "Continue": "继续", "Quit": "退出", "Refresh": "刷新",
     "Retry": "重试", "Reload": "重新加载", "Request failed": "操作失败",
     "Use": "使用", "Models": "模型", "Sessions": "会话", "Session": "会话",
-    "Open Codex": "打开 Codex", "All models": "所有模型", "Switch backend": "切换后端",
+    "Open Codex": "打开 Codex", "Backend models": "当前后端模型", "Switch backend": "切换后端",
+    "Model overview": "跨后端模型总览", "Browse backend": "浏览后端模型",
+    "Model catalogs only; model access has not been verified.": "此处展示模型目录，尚未验证模型访问权限。",
+    "Showing {count} models; more are available.": "已显示 {count} 个，还有更多模型。",
+    "No models returned.": "未返回模型。",
+    "Unavailable": "不可用",
     "Set up this Codex": "接入当前 Codex", "New provider": "新建供应商",
     "Attach existing": "接入已有目录", "Connect bridge": "连接桥接",
     "Install launcher": "安装启动命令", "Daemon status": "后台服务状态",
@@ -121,7 +126,7 @@ ZH = {
     "Verify and connect": "验证并连接", "Loading models": "正在加载模型", "Model details": "模型详情",
     "New session": "新建会话", "Next page": "下一页",
     "Available model IDs come from this daemon's current catalog.": "模型 ID 来自此后台服务当前的模型目录。",
-    "Models across providers": "各供应商的模型", "Discovering provider models": "正在发现供应商模型",
+    "Discovering provider models": "正在发现供应商模型",
     "Provider default": "供应商默认值", "Verifying": "正在验证",
     "A real response was verified and the test session was deleted.": "已验证真实模型响应，并删除测试会话。",
     "Verify model access": "验证模型访问", "Open session": "打开会话", "No sessions yet.": "暂无会话。",
@@ -185,6 +190,34 @@ ZH = {
     "Inspecting Codex": "正在检查 Codex", "Cannot inspect Codex": "无法检查 Codex",
     "Read from the running Codex backend. This does not verify model access or remaining credits.": "信息来自运行中的 Codex 后台；模型可用性和剩余额度尚未验证。",
     "This account response does not identify browser, device-code or access-token sign-in.": "此账户响应未区分浏览器、设备码或访问令牌登录。",
+    "No models on this page.": "本页暂无模型。",
+    "No sessions on this page.": "本页暂无会话。",
+    "Codex exited with status {code}.": "Codex 已退出，退出码为 {code}。",
+    "ok": "正常", "warning": "警告", "error": "错误",
+    "Bridge command": "桥接命令", "Provider registry": "后端注册文件",
+    "Not installed": "尚未安装", "Not found on PATH": "在 PATH 中未找到",
+    "Install Python 3.11 or newer.": "请安装 Python 3.11 或更新版本。",
+    "Run install.sh again to repair dependencies.": "请重新运行 install.sh 修复依赖。",
+    "This release was validated with {package} {version}.": "此版本使用 {package} {version} 完成验证。",
+    "Install Codex CLI and reopen this terminal.": "请安装 Codex CLI，然后重新打开终端。",
+    "Could not verify the installed CLI": "无法验证已安装的 CLI",
+    "Check that codex --version works in this terminal.": "请确认在此终端运行 codex --version 能正常返回。",
+    "Installed entry point is unavailable": "已安装的命令入口不可用",
+    "Run install.sh again to restore the command.": "请重新运行 install.sh 恢复命令入口。",
+    "No configuration yet": "尚未配置",
+    "Open the manager and choose Set up this Codex or New provider.": "请打开管理器，选择“接入当前 Codex”或“新建供应商”。",
+    "Configuration could not be loaded": "无法加载配置",
+    "Use More tools > Choose registry to select a valid registry, or restore this file.": "请通过“更多工具 → 选择注册文件”选择有效文件，或恢复此文件。",
+    "Backend directory or provider binding is invalid": "后端目录或供应商绑定无效",
+    "Select the correct Codex directory and provider in the manager.": "请在管理器中选择正确的 Codex 目录和供应商。",
+    "Provider binding matches": "供应商绑定一致", "route enabled": "后端已启用", "route disabled": "后端已禁用",
+    "control socket present": "控制套接字存在", "no control socket": "控制套接字不存在",
+    "Use Daemon status to check the process; Connect bridge verifies model access.": "可通过“后台服务状态”检查进程，通过“连接桥接”验证模型访问。",
+    "{name} MCP registration": "{name} MCP 注册",
+    "Registered version differs from this program": "注册版本与当前程序不同",
+    "Use Connect bridge to refresh this backend, including compatibility entries.": "请通过“连接桥接”刷新此后端及其兼容入口。",
+    "Could not inspect registration metadata": "无法检查注册信息",
+    "Inspect this backend through Connect bridge.": "请通过“连接桥接”检查此后端。",
 
 }
 
@@ -231,6 +264,21 @@ def save_language(registry: Path, language: str) -> None:
 def translate(language: str, source: str, **values) -> str:
     text = ZH.get(source, source) if language == "zh-CN" else source
     return text.format(**values) if values else text
+
+
+def diagnostic_text(language: str, value: str) -> str:
+    """Localize known diagnostic prose without changing CLI output or provider data."""
+    if match := re.fullmatch(r"(\d+) backend\(s\)", value):
+        return translate(language, "{count} backends", count=match[1])
+    if match := re.fullmatch(r"This release was validated with (\S+) (\S+)\.", value):
+        return translate(language, "This release was validated with {package} {version}.",
+                         package=match[1], version=match[2])
+    if value.endswith(" MCP registration"):
+        return translate(language, "{name} MCP registration", name=value.removesuffix(" MCP registration"))
+    if value.startswith("Provider binding matches; "):
+        return ("；" if language == "zh-CN" else "; ").join(
+            translate(language, part) for part in value.split("; "))
+    return translate(language, value)
 
 
 def wrap_text(text: str, columns: int) -> str:
